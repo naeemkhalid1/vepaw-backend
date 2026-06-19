@@ -11,8 +11,11 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { Model, Types } from 'mongoose';
 import { createHash, randomBytes, randomInt } from 'crypto';
+import * as bcrypt from 'bcrypt';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { RefreshToken, RefreshTokenDocument } from '../../database/schemas/refresh-token.schema';
+import { Vet, VetDocument } from '../../database/schemas/vet.schema';
+import { Store, StoreDocument } from '../../database/schemas/store.schema';
 import { RedisService } from '../../common/redis/redis.service';
 import { SmsService } from './sms.service';
 import { JwtPayload, ServiceResponse, UserResponse } from '../../shared/types';
@@ -21,6 +24,9 @@ import { SendOtpDto } from './dto/send-otp.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { LogoutDto } from './dto/logout.dto';
+import { LoginDto } from './dto/login.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { AdminLoginDto } from './dto/admin-login.dto';
 
 const OTP_TTL_SECONDS = 60;
 const OTP_RATE_WINDOW_SECONDS = 600;
@@ -40,6 +46,8 @@ export class AuthService {
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     @InjectModel(RefreshToken.name)
     private readonly refreshTokenModel: Model<RefreshTokenDocument>,
+    @InjectModel(Vet.name) private readonly vetModel: Model<VetDocument>,
+    @InjectModel(Store.name) private readonly storeModel: Model<StoreDocument>,
     private readonly redisService: RedisService,
     private readonly jwtService: JwtService,
     private readonly config: ConfigService,
@@ -166,8 +174,58 @@ export class AuthService {
     return { accessToken, refreshToken: rawRefreshToken };
   }
 
+  async login(dto: LoginDto): Promise<ServiceResponse<{ token: string; redirectTo: string }>> {
+    const vet = await this.vetModel
+      .findOne({ $or: [{ email: dto.emailOrPhone }, { phone: dto.emailOrPhone }] })
+      .select('+password')
+      .exec();
+
+    if (vet && vet.password) {
+      const valid = await bcrypt.compare(dto.password, vet.password);
+      if (!valid) {
+        throw new UnauthorizedException({ message: 'Invalid credentials', code: 'INVALID_CREDENTIALS' });
+      }
+      const payload: JwtPayload = { sub: vet._id.toString(), phone: vet.phone, role: 'vet' };
+      const token = this.jwtService.sign(payload);
+      return { data: { token, redirectTo: '/vet/schedule' }, message: 'Login successful' };
+    }
+
+    const store = await this.storeModel
+      .findOne({ $or: [{ email: dto.emailOrPhone }, { phone: dto.emailOrPhone }] })
+      .exec();
+
+    if (store && store.password) {
+      const valid = await bcrypt.compare(dto.password, store.password);
+      if (!valid) {
+        throw new UnauthorizedException({ message: 'Invalid credentials', code: 'INVALID_CREDENTIALS' });
+      }
+      const payload: JwtPayload = { sub: store._id.toString(), phone: store.phone, role: 'store' };
+      const token = this.jwtService.sign(payload);
+      return { data: { token, redirectTo: '/store/orders' }, message: 'Login successful' };
+    }
+
+    throw new UnauthorizedException({ message: 'Invalid credentials', code: 'INVALID_CREDENTIALS' });
+  }
+
+  async forgotPassword(dto: ForgotPasswordDto): Promise<ServiceResponse<null>> {
+    this.logger.log(`Password reset requested for ${dto.emailOrPhone}`);
+    return { data: null, message: 'If that account exists, a reset link has been sent' };
+  }
+
+  async adminLogin(dto: AdminLoginDto): Promise<ServiceResponse<{ token: string; redirectTo: string }>> {
+    const adminEmail = this.config.get<string>('ADMIN_EMAIL', 'admin@vepaw.pk');
+    const adminPassword = this.config.get<string>('ADMIN_PASSWORD', 'admin123');
+
+    if (dto.email !== adminEmail || dto.password !== adminPassword) {
+      throw new UnauthorizedException({ message: 'Invalid credentials', code: 'INVALID_CREDENTIALS' });
+    }
+
+    const payload: JwtPayload = { sub: 'admin', phone: '', role: 'admin' };
+    const token = this.jwtService.sign(payload);
+    return { data: { token, redirectTo: '/admin/overview' }, message: 'Login successful' };
+  }
+
   private hashToken(token: string): string {
     return createHash('sha256').update(token).digest('hex');
   }
-
 }

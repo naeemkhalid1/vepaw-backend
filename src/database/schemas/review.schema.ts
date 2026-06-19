@@ -28,6 +28,15 @@ export class Review {
 
   @Prop({ required: true })
   petType: string;
+
+  @Prop({ type: String, default: null })
+  reply: string | null;
+
+  @Prop({ type: String, default: null })
+  reviewerName: string | null;
+
+  @Prop({ type: String, default: null })
+  petName: string | null;
 }
 
 export const ReviewSchema = SchemaFactory.createForClass(Review);

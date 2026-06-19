@@ -65,3 +65,46 @@ These are the rules to follow throughout this project, for consistency across ev
 - Keep functions short and single-purpose — if a function needs "and" to describe what it does, split it.
 - DRY: if the same logic appears in two places, extract it into a shared service/utility instead of copy-pasting.
 - No magic numbers/strings scattered in code — pull them into named constants if they appear more than once.
+
+## 10. TODO — Hardcoded / Stub Items (Web Portal APIs)
+
+Items that return dummy data or have incomplete logic. Fix before production.
+
+### A. Stub Endpoints (do nothing / return empty)
+
+| # | Item | File:Line | What it does now |
+|---|---|---|---|
+| 1 | Forgot password | `auth.service.ts:210` | Logs and returns "reset link sent" — sends nothing |
+| 2 | File upload | `vet-portal.service.ts:931` | Returns filename — doesn't save to Cloudinary/S3 |
+| 3 | Block slots | `vet-portal.service.ts:823` | Logs slot IDs — doesn't persist blocked slots |
+| 4 | Bulk import preview | `store-portal.service.ts:329` | Returns empty arrays — no CSV parsing |
+| 5 | Bulk import confirm | `store-portal.service.ts:346` | Returns `imported: 0` — no actual import |
+| 6 | Store withdraw | `store-portal.service.ts:401` | Returns `success: true` — no payout processing |
+
+### B. Fake / Wrong Logic
+
+| # | Item | File:Line | What's wrong |
+|---|---|---|---|
+| 7 | Admin login returns static token | `admin.service.ts:354` | Returns string `'admin-token'` instead of signed JWT |
+| 8 | ordersVolume = ordersToday × 1500 | `admin.service.ts:231` | Fake multiplier, should sum real order values |
+| 9 | Store reviews query | `store-portal.service.ts:424` | Queries reviews by order IDs — but reviews are linked to vets/appointments, not stores |
+| 10 | Availability slots | `vet-portal.service.ts:794` | Hardcoded 9AM–6PM grid — should read from vet's `workingHours` |
+
+### C. Always-Hardcoded Field Values
+
+| # | Item | Where | Hardcoded value |
+|---|---|---|---|
+| 11 | All `*Change` fields | 21 places across all 3 services | Always `0` — never compares current vs previous period |
+| 12 | `nextAutoPayout` | `store-portal.service.ts:393`, `vet-portal.service.ts:491` | Always `'Monday'` |
+| 13 | `retention` / `retentionChange` | `admin.service.ts:322` | Always `'0%'` |
+| 14 | `disputes` / `disputesSubtitle` | `admin.service.ts:234` | Always `0` / `'no active disputes'` |
+| 15 | `visitType` | `vet-portal.service.ts:149,187,300` | Always `'checkup'` — appointment schema has no visitType field |
+| 16 | `duration` | `vet-portal.service.ts:143` | Always `'30 min'` |
+| 17 | `frequency` | `store-portal.service.ts:189` | Always `'Monthly'` — no frequency field on orders |
+| 18 | `commissionRate` | `vet-portal.service.ts:729` | Always `'15%'` — should read from commission tiers |
+| 19 | `slotLength` | `vet-portal.service.ts:720` | Always `'30 min'` |
+| 20 | `lunchBreak` | `vet-portal.service.ts:721` | Always `'13:00 – 14:00'` |
+| 21 | `bookableSlotsPerDay` | `vet-portal.service.ts:722` | Always `16` |
+| 22 | Clinic notifications array | `vet-portal.service.ts:733-736` | 4 hardcoded items — not stored per-vet |
+| 23 | Default commission tiers | `admin.service.ts:244-245` | Falls back to hardcoded `15%` vet / `0%` store when DB empty |
+| 24 | `activeVetsCity` | `admin.service.ts:124` | Always `'Lahore'` |

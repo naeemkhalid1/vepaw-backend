@@ -52,6 +52,9 @@ export class Vet {
   @Prop({ required: true, unique: true })
   email: string;
 
+  @Prop({ type: String, default: null, select: false })
+  password: string | null;
+
   @Prop({ required: true })
   phone: string;
 
@@ -136,6 +139,50 @@ export class Vet {
 
   @Prop({ default: false })
   featured: boolean;
+
+  @Prop({ type: String, default: null })
+  pvmcNumber: string | null;
+
+  @Prop({ type: String, default: null })
+  primaryQualification: string | null;
+
+  @Prop({ type: String, default: null })
+  university: string | null;
+
+  @Prop({ type: String, default: null })
+  additionalCertifications: string | null;
+
+  @Prop({ type: String, default: null })
+  pvmcLicense: string | null;
+
+  @Prop({ type: String, default: null })
+  degreeCertificate: string | null;
+
+  @Prop({ type: String, default: null })
+  cnicDocument: string | null;
+
+  @Prop({ type: String, default: null })
+  clinicPhoto: string | null;
+
+  @Prop({ type: String, default: null })
+  payoutMethod: string | null;
+
+  @Prop({ type: String, default: null })
+  accountTitle: string | null;
+
+  @Prop({ type: String, default: null })
+  mobileAccount: string | null;
+
+  @Prop({ type: String, default: null })
+  cnicOnAccount: string | null;
+
+  @Prop({
+    type: String,
+    enum: ['pending', 'approved', 'rejected'],
+    default: 'approved',
+    index: true,
+  })
+  applicationStatus: 'pending' | 'approved' | 'rejected';
 }
 
 export const VetSchema = SchemaFactory.createForClass(Vet);

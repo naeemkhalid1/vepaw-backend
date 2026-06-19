@@ -17,6 +17,9 @@ export class User {
   @Prop({ type: String, default: null })
   email: string | null;
 
+  @Prop({ type: String, default: null, select: false })
+  password: string | null;
+
   @Prop({ type: String, enum: ['male', 'female', 'other'], default: null })
   gender: 'male' | 'female' | 'other' | null;
 

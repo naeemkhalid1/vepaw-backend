@@ -18,6 +18,8 @@ import { MessagesModule } from './modules/messages/messages.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { RealtimeModule } from './modules/realtime/realtime.module';
+import { StorePortalModule } from './modules/store-portal/store-portal.module';
+import { VetPortalModule } from './modules/vet-portal/vet-portal.module';
 
 @Module({
   imports: [
@@ -50,6 +52,8 @@ import { RealtimeModule } from './modules/realtime/realtime.module';
     NotificationsModule,
     AdminModule,
     RealtimeModule,
+    StorePortalModule,
+    VetPortalModule,
   ],
 })
 export class AppModule {}

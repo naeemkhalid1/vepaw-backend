@@ -5,6 +5,8 @@ import { PassportModule } from '@nestjs/passport';
 import { ConfigService } from '@nestjs/config';
 import { User, UserSchema } from '../../database/schemas/user.schema';
 import { RefreshToken, RefreshTokenSchema } from '../../database/schemas/refresh-token.schema';
+import { Vet, VetSchema } from '../../database/schemas/vet.schema';
+import { Store, StoreSchema } from '../../database/schemas/store.schema';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { SmsService } from './sms.service';
@@ -27,6 +29,8 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     MongooseModule.forFeature([
       { name: User.name, schema: UserSchema },
       { name: RefreshToken.name, schema: RefreshTokenSchema },
+      { name: Vet.name, schema: VetSchema },
+      { name: Store.name, schema: StoreSchema },
     ]),
   ],
   controllers: [AuthController],

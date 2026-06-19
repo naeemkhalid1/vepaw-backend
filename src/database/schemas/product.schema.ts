@@ -48,6 +48,32 @@ export class Product {
   @Prop({ default: true, index: true })
   inStock: boolean;
 
+  @Prop({ default: 0, min: 0 })
+  stock: number;
+
+  @Prop({ default: 0, min: 0 })
+  sold: number;
+
+  @Prop({
+    type: String,
+    enum: ['active', 'draft', 'lowStock', 'outOfStock', 'hidden'],
+    default: 'active',
+    index: true,
+  })
+  productStatus: 'active' | 'draft' | 'lowStock' | 'outOfStock' | 'hidden';
+
+  @Prop({ default: false })
+  requiresPrescription: boolean;
+
+  @Prop({ type: String, default: null })
+  batchNumber: string | null;
+
+  @Prop({ type: String, default: null })
+  expiryDate: string | null;
+
+  @Prop({ type: String, default: null })
+  sku: string | null;
+
   @Prop({ default: false })
   isVetRecommended: boolean;
 
