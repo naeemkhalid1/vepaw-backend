@@ -23,6 +23,13 @@ import { StoreRegisterDto } from './dto/store-register.dto';
 import { ReplyReviewDto } from './dto/reply-review.dto';
 import { InviteTeamMemberDto } from './dto/invite-team-member.dto';
 import { AcceptStoreInviteDto } from './dto/accept-store-invite.dto';
+import {
+  UpdateOrderStatusDto,
+  UpdateSubscriptionStatusDto,
+  UpdateProductStatusDto,
+  UpdateTeamMemberStatusDto,
+  UpdatePayoutAccountDto,
+} from './dto/update-status.dto';
 
 // ─── Orders Controller ──────────────────────────────────
 
@@ -45,25 +52,11 @@ export class StoreOrdersController {
     return this.service.getOrderStats(user.sub);
   }
 
-  @Post(':id/pack')
+  @Post(':id/status')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Pack order' })
-  packOrder(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.service.packOrder(user.sub, id);
-  }
-
-  @Post(':id/dispatch')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Dispatch order' })
-  dispatchOrder(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.service.dispatchOrder(user.sub, id);
-  }
-
-  @Post(':id/deliver')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Deliver order' })
-  deliverOrder(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.service.deliverOrder(user.sub, id);
+  @ApiOperation({ summary: 'Update order status' })
+  updateStatus(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: UpdateOrderStatusDto) {
+    return this.service.updateOrderStatus(user.sub, id, dto.status);
   }
 }
 
@@ -86,6 +79,13 @@ export class StoreSubscriptionsController {
   @ApiOperation({ summary: 'Subscription stats' })
   getSubscriptionStats(@CurrentUser() user: JwtPayload) {
     return this.service.getSubscriptionStats(user.sub);
+  }
+
+  @Post(':id/status')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Update subscription status' })
+  updateStatus(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: UpdateSubscriptionStatusDto) {
+    return this.service.updateSubscriptionStatus(user.sub, id, dto.status);
   }
 }
 
@@ -110,6 +110,12 @@ export class StoreProductsController {
     return this.service.getProductStats(user.sub);
   }
 
+  @Get('categories')
+  @ApiOperation({ summary: 'Get product categories' })
+  getCategories() {
+    return this.service.getProductCategories();
+  }
+
   @Post()
   @ApiOperation({ summary: 'Add product' })
   createProduct(@CurrentUser() user: JwtPayload, @Body() dto: CreateProductDto) {
@@ -122,12 +128,27 @@ export class StoreProductsController {
     return this.service.createProductDraft(user.sub, dto);
   }
 
+  @Get(':id')
+  @ApiOperation({ summary: 'Get product detail' })
+  getProduct(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.service.getProduct(user.sub, id);
+  }
+
   @Put(':id')
   @ApiOperation({ summary: 'Update product' })
   updateProduct(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: UpdateProductDto) {
     return this.service.updateProduct(user.sub, id, dto);
   }
+
+  @Post(':id/status')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Update product status' })
+  updateProductStatus(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: UpdateProductStatusDto) {
+    return this.service.updateProductStatus(user.sub, id, dto.status);
+  }
 }
+
+// ─── Product Categories Controller ───────────────────────
 
 // ─── Bulk Import Controller ──────────────────────────────
 
@@ -251,6 +272,13 @@ export class StoreTeamController {
   inviteTeamMember(@CurrentUser() user: JwtPayload, @Body() dto: InviteTeamMemberDto) {
     return this.service.inviteTeamMember(user.sub, dto);
   }
+
+  @Post(':id/status')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Update team member status' })
+  updateMemberStatus(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: UpdateTeamMemberStatusDto) {
+    return this.service.updateTeamMemberStatus(user.sub, id, dto.status);
+  }
 }
 
 // ─── Settings Controller ─────────────────────────────────
@@ -272,6 +300,13 @@ export class StoreSettingsController {
   @ApiOperation({ summary: 'Update store settings' })
   updateSettings(@CurrentUser() user: JwtPayload, @Body() dto: UpdateStoreSettingsDto) {
     return this.service.updateSettings(user.sub, dto);
+  }
+
+  @Post('payout')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Submit new payout account' })
+  updatePayoutAccount(@CurrentUser() user: JwtPayload, @Body() dto: UpdatePayoutAccountDto) {
+    return this.service.updatePayoutAccount(user.sub, dto.accountNumber);
   }
 }
 

@@ -4,6 +4,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { ScheduleModule } from '@nestjs/schedule';
 import { RedisModule } from './common/redis/redis.module';
+import { EmailModule } from './common/email/email.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { UsersModule } from './modules/users/users.module';
 import { PetsModule } from './modules/pets/pets.module';
@@ -37,6 +38,7 @@ import { VetPortalModule } from './modules/vet-portal/vet-portal.module';
     ScheduleModule.forRoot(),
 
     RedisModule,
+    EmailModule,
 
     AuthModule,
     UsersModule,

@@ -94,6 +94,9 @@ export class Store {
   })
   status: 'pending' | 'approved' | 'rejected';
 
+  @Prop({ type: String, default: null })
+  rejectionReason: string | null;
+
   @Prop({
     type: String,
     enum: ['user', 'store'],

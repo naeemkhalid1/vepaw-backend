@@ -59,11 +59,8 @@ export class Vet {
   phone: string;
 
   @Prop({
-    type: {
-      type: { type: String, enum: ['Point'], required: true },
-      coordinates: { type: [Number], required: true },
-    },
-    default: () => ({ type: 'Point', coordinates: [74.3436, 31.5204] }), // Lahore center
+    type: { type: String, enum: ['Point'], default: 'Point' },
+    coordinates: { type: [Number], default: [74.3436, 31.5204] },
   })
   location: { type: string; coordinates: number[] };
 
@@ -110,6 +107,24 @@ export class Vet {
     default: defaultWorkingHours,
   })
   workingHours: WorkingHours;
+
+  @Prop({ default: true })
+  inPersonEnabled: boolean;
+
+  @Prop({ default: false })
+  videoEnabled: boolean;
+
+  @Prop({ default: false })
+  textEnabled: boolean;
+
+  @Prop({ default: '30 min' })
+  slotLength: string;
+
+  @Prop({ default: '13:00' })
+  lunchStart: string;
+
+  @Prop({ default: '14:00' })
+  lunchEnd: string;
 
   @Prop({ default: false })
   is24Hours: boolean;
@@ -175,6 +190,21 @@ export class Vet {
 
   @Prop({ type: String, default: null })
   cnicOnAccount: string | null;
+
+  @Prop({
+    type: [{
+      _id: false,
+      id: { type: String, required: true },
+      enabled: { type: Boolean, default: true },
+    }],
+    default: () => [
+      { id: 'new-booking', enabled: true },
+      { id: 'cancellation', enabled: true },
+      { id: 'review', enabled: true },
+      { id: 'payout', enabled: true },
+    ],
+  })
+  notifications: { id: string; enabled: boolean }[];
 
   @Prop({
     type: String,

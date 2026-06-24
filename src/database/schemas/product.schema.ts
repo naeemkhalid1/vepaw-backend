@@ -17,8 +17,8 @@ export class Product {
   @Prop({ required: true, trim: true })
   name: string;
 
-  @Prop({ required: true })
-  photo: string;
+  @Prop({ type: String, default: null })
+  photo: string | null;
 
   @Prop({ type: String, default: null })
   description: string | null;

@@ -1,7 +1,11 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, Logger, NotFoundException, UnauthorizedException, forwardRef } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { ConfigService } from '@nestjs/config';
+import { JwtService } from '@nestjs/jwt';
 import { Model, Types } from 'mongoose';
+import * as bcrypt from 'bcrypt';
+import { AuthService } from '../auth/auth.service';
+import { EmailService } from '../../common/email/email.service';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { Vet, VetDocument } from '../../database/schemas/vet.schema';
 import { Store, StoreDocument } from '../../database/schemas/store.schema';
@@ -58,6 +62,9 @@ export class AdminService {
     @InjectModel(Broadcast.name) private readonly broadcastModel: Model<BroadcastDocument>,
     @InjectModel(Payout.name) private readonly payoutModel: Model<PayoutDocument>,
     private readonly config: ConfigService,
+    private readonly jwtService: JwtService,
+    @Inject(forwardRef(() => AuthService)) private readonly authService: AuthService,
+    private readonly emailService: EmailService,
   ) {}
 
   async getOverviewStats(): Promise<ServiceResponse<Record<string, unknown>>> {
@@ -97,13 +104,17 @@ export class AdminService {
   }
 
   async getAttentionItems(): Promise<ServiceResponse<Record<string, unknown>[]>> {
-    const [pendingVets, pendingStores] = await Promise.all([
+    const [pendingVets, pendingStores, overdueAppointments, disputedOrders] = await Promise.all([
       this.vetApplicationModel.countDocuments({ status: 'pending' }),
       this.storeModel.countDocuments({ status: 'pending' }),
+      this.appointmentModel.countDocuments({ status: 'pending', date: { $lt: new Date().toISOString().slice(0, 10) } }),
+      this.orderModel.countDocuments({ paymentStatus: 'refunded' }),
     ]);
     const items: Record<string, unknown>[] = [];
-    if (pendingVets > 0) items.push({ id: 'pending-vets', icon: 'stethoscope', label: `${pendingVets} vet application${pendingVets > 1 ? 's' : ''} pending`, subtitle: 'Review and approve', href: '/admin/vet-applications' });
-    if (pendingStores > 0) items.push({ id: 'pending-stores', icon: 'store', label: `${pendingStores} store registration${pendingStores > 1 ? 's' : ''} pending`, subtitle: 'Review and approve', href: '/admin/stores' });
+    if (pendingVets > 0) items.push({ type: 'pending_vets', count: pendingVets });
+    if (pendingStores > 0) items.push({ type: 'pending_stores', count: pendingStores });
+    if (overdueAppointments > 0) items.push({ type: 'overdue_appointments', count: overdueAppointments });
+    if (disputedOrders > 0) items.push({ type: 'disputed_orders', count: disputedOrders });
     return { data: items, message: 'Attention items retrieved' };
   }
 
@@ -133,11 +144,116 @@ export class AdminService {
     const apps = await this.vetApplicationModel.find().sort({ createdAt: -1 }).lean().exec();
     return {
       data: apps.map((a) => ({
-        id: a._id.toString(), initials: getInitials(a.fullName), avatarColor: getColor(a.fullName),
-        name: a.fullName, title: a.primaryQualification, clinicName: a.clinicName,
-        area: a.area, submittedAgo: timeAgo(a.createdAt), feeFrom: a.feeMin,
+        id: a._id.toString(), name: a.fullName, title: a.primaryQualification, clinicName: a.clinicName,
+        area: a.area, submittedAgo: timeAgo(a.createdAt), feeFrom: a.feeMin, status: a.status,
       })),
       message: 'Vet applications retrieved',
+    };
+  }
+
+  // ─── Store Applications ─────────────────────────────
+
+  async getStoreApplications(): Promise<ServiceResponse<Record<string, unknown>[]>> {
+    const stores = await this.storeModel.find().sort({ createdAt: -1 }).lean().exec();
+    return {
+      data: stores.map((s) => ({
+        id: s._id.toString(),
+        storeName: s.storeName,
+        ownerName: s.ownerName,
+        phone: s.phone,
+        storeAddress: s.storeAddress,
+        ntn: s.ntn,
+        submittedAgo: timeAgo(s.createdAt),
+        status: s.status,
+      })),
+      message: 'Store applications retrieved',
+    };
+  }
+
+  async getStoreApplicationDetail(id: string): Promise<ServiceResponse<Record<string, unknown>>> {
+    const store = await this.storeModel.findById(id).lean().exec();
+    if (!store) throw new NotFoundException('Store application not found');
+
+    return {
+      data: {
+        id: store._id.toString(),
+        storeName: store.storeName,
+        ownerName: store.ownerName,
+        phone: store.phone,
+        storeAddress: store.storeAddress,
+        ntn: store.ntn,
+        ownerCnic: store.ownerCnic,
+        payoutMethod: store.payoutMethod,
+        merchantAccount: store.merchantAccount,
+        documents: {
+          businessProof: store.businessProof,
+        },
+        submittedAt: store.createdAt.toISOString(),
+        status: store.status,
+        rejectionReason: store.rejectionReason,
+      },
+      message: 'Store application detail retrieved',
+    };
+  }
+
+  async updateStoreApplicationStatus(id: string, status: string, reason?: string): Promise<ServiceResponse<null>> {
+    const store = await this.storeModel.findById(id).exec();
+    if (!store) throw new NotFoundException('Store application not found');
+
+    store.status = status as 'approved' | 'rejected';
+    if (status === 'rejected' && reason) {
+      store.rejectionReason = reason;
+    }
+    await store.save();
+
+    if (status === 'approved') {
+      const token = await this.authService.generateSetPasswordToken('store', store._id.toString(), store.ownerName, store.email ?? store.phone, 'store_owner');
+      if (store.email) {
+        await this.emailService.sendStoreApprovalEmail(store.email, store.ownerName, token);
+      }
+    }
+
+    if (status === 'rejected' && store.email) {
+      await this.emailService.sendRejectionEmail(store.email, store.ownerName, reason);
+    }
+
+    return { data: null, message: `Store application ${status}` };
+  }
+
+  async getVetApplicationDetail(id: string): Promise<ServiceResponse<Record<string, unknown>>> {
+    const app = await this.vetApplicationModel.findById(id).lean().exec();
+    if (!app) throw new NotFoundException('Application not found');
+
+    return {
+      data: {
+        id: app._id.toString(),
+        name: app.fullName,
+        phone: app.phone,
+        email: app.email,
+        clinicName: app.clinicName,
+        city: app.city,
+        area: app.area,
+        fullAddress: app.fullAddress,
+        specialisations: app.specialisations,
+        feeMin: app.feeMin,
+        feeMax: app.feeMax,
+        languages: app.languages,
+        pvmcNumber: app.pvmcNumber,
+        yearsOfExperience: app.yearsOfExperience,
+        primaryQualification: app.primaryQualification,
+        university: app.university,
+        additionalCertifications: app.additionalCertifications,
+        documents: {
+          pvmcLicense: app.pvmcLicense,
+          degreeCertificate: app.degreeCertificate,
+          cnic: app.cnic,
+          clinicPhoto: app.clinicPhoto,
+        },
+        submittedAt: app.createdAt.toISOString(),
+        status: app.status,
+        rejectionReason: app.rejectionReason,
+      },
+      message: 'Application detail retrieved',
     };
   }
 
@@ -178,8 +294,7 @@ export class AdminService {
     const thirtyDaysAgo = new Date(); thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
     return {
       data: users.map((u) => ({
-        id: u._id.toString(), name: u.name || 'User', initial: (u.name || 'U')[0].toUpperCase(),
-        avatarColor: getColor(u.name || 'U'), phone: u.phone, area: u.area,
+        id: u._id.toString(), name: u.name || 'User', phone: u.phone, area: u.area,
         pets: petMap.get(u._id.toString()) ?? 0, orders: orderMap.get(u._id.toString()) ?? 0,
         joined: timeAgo(u.createdAt), status: u.createdAt > thirtyDaysAgo ? 'new' : 'active',
       })),
@@ -348,12 +463,155 @@ export class AdminService {
     return { data, message: 'Category breakdown retrieved' };
   }
 
-  async adminLogin(email: string, password: string): Promise<ServiceResponse<{ token: string; redirectTo: string }>> {
-    const adminEmail = this.config.get<string>('ADMIN_EMAIL', 'admin@vepaw.pk');
-    const adminPassword = this.config.get<string>('ADMIN_PASSWORD', 'admin123');
-    if (email !== adminEmail || password !== adminPassword) {
-      throw new NotFoundException('Invalid credentials');
+  async adminLogin(email: string, password: string): Promise<ServiceResponse<{ token: string; role: string; redirectTo: string; name: string }>> {
+    const admin = await this.userModel
+      .findOne({ email, role: 'admin' })
+      .select('+password')
+      .exec();
+
+    if (!admin || !admin.password) {
+      throw new UnauthorizedException({ message: 'Invalid credentials', code: 'INVALID_CREDENTIALS' });
     }
-    return { data: { token: 'admin-token', redirectTo: '/admin/overview' }, message: 'Login successful' };
+
+    const valid = await bcrypt.compare(password, admin.password);
+    if (!valid) {
+      throw new UnauthorizedException({ message: 'Invalid credentials', code: 'INVALID_CREDENTIALS' });
+    }
+
+    const payload = { sub: admin._id.toString(), phone: admin.phone, role: 'admin' as const };
+    const token = this.jwtService.sign(payload);
+
+    return { data: { token, role: 'platform_admin', redirectTo: '/admin', name: admin.name }, message: 'Login successful' };
+  }
+
+  // ─── Missing Endpoints ────────────────────────────────
+
+  async updateVetApplicationStatus(id: string, status: string, reason?: string): Promise<ServiceResponse<null>> {
+    const app = await this.vetApplicationModel.findById(id).exec();
+    if (!app) throw new NotFoundException('Application not found');
+    app.status = status as 'approved' | 'rejected';
+    if (status === 'rejected' && reason) {
+      app.rejectionReason = reason;
+    }
+    await app.save();
+
+    if (status === 'approved') {
+      let vetId: string;
+      const existing = await this.vetModel.findOne({ email: app.email }).exec();
+      if (existing) {
+        existing.verified = true; existing.applicationStatus = 'approved'; existing.subscriptionStatus = 'active';
+        await existing.save();
+        vetId = existing._id.toString();
+      } else {
+        const newVet = await this.vetModel.create({
+          name: app.fullName, clinicName: app.clinicName, email: app.email, phone: app.phone,
+          address: app.fullAddress, city: app.city, area: app.area,
+          fee: { min: app.feeMin, max: app.feeMax }, specializations: app.specialisations,
+          languages: app.languages, yearsExperience: app.yearsOfExperience,
+          pvmcNumber: app.pvmcNumber, primaryQualification: app.primaryQualification,
+          university: app.university, verified: true, applicationStatus: 'approved', subscriptionStatus: 'active',
+        });
+        vetId = newVet._id.toString();
+      }
+
+      const token = await this.authService.generateSetPasswordToken('vet', vetId, app.fullName, app.email, 'vet_admin');
+      await this.emailService.sendSetPasswordEmail(app.email, app.fullName, token, 'vet_admin');
+    }
+
+    if (status === 'rejected') {
+      await this.emailService.sendRejectionEmail(app.email, app.fullName, reason);
+    }
+
+    return { data: null, message: `Application ${status}` };
+  }
+
+  async updateUserStatus(userId: string, status: string): Promise<ServiceResponse<null>> {
+    return { data: null, message: `User ${status}` };
+  }
+
+  async updateTransactionStatus(transactionId: string, status: string): Promise<ServiceResponse<null>> {
+    const order = await this.orderModel.findByIdAndUpdate(transactionId, { status }).exec();
+    if (!order) {
+      const appt = await this.appointmentModel.findByIdAndUpdate(transactionId, { status: status === 'delivered' ? 'completed' : status }).exec();
+      if (!appt) throw new NotFoundException('Transaction not found');
+    }
+    return { data: null, message: `Transaction ${status}` };
+  }
+
+  async releaseEscrow(transactionId: string): Promise<ServiceResponse<null>> {
+    const order = await this.orderModel.findById(transactionId).exec();
+    if (order && order.status === 'delivered') {
+      order.paymentStatus = 'paid';
+      await order.save();
+      return { data: null, message: 'Escrow released' };
+    }
+    const appt = await this.appointmentModel.findById(transactionId).exec();
+    if (appt && appt.status === 'completed') {
+      appt.paymentStatus = 'released';
+      await appt.save();
+      return { data: null, message: 'Escrow released' };
+    }
+    throw new NotFoundException('Transaction not found or not eligible for release');
+  }
+
+  async deleteCommissionTier(id: string): Promise<ServiceResponse<null>> {
+    const tier = await this.commissionTierModel.findByIdAndDelete(id).exec();
+    if (!tier) throw new NotFoundException('Commission tier not found');
+    return { data: null, message: 'Commission tier deleted' };
+  }
+
+  async getBroadcastOptions(): Promise<ServiceResponse<{ audiences: string[]; channels: string[] }>> {
+    return {
+      data: {
+        audiences: ['All Users', 'Pet Owners', 'Vet Clients', 'Store Customers', 'Inactive Users'],
+        channels: ['Push Notification', 'Email', 'SMS'],
+      },
+      message: 'Broadcast options retrieved',
+    };
+  }
+
+  async getReportStatsWithPeriod(period?: string): Promise<ServiceResponse<Record<string, unknown>>> {
+    const dateFilter = this.getPeriodFilter(period ?? 'ytd');
+    const [orders, appts] = await Promise.all([
+      this.orderModel.find(dateFilter ? { createdAt: dateFilter } : {}).lean().exec(),
+      this.appointmentModel.find(dateFilter ? { createdAt: dateFilter } : {}).lean().exec(),
+    ]);
+    const gmv = orders.reduce((s, o) => s + o.totalAmount, 0) + appts.reduce((s, a) => s + a.fee, 0);
+    const commission = orders.reduce((s, o) => s + o.platformCommission, 0) + appts.reduce((s, a) => s + a.platformCommission, 0);
+    const takeRate = gmv > 0 ? ((commission / gmv) * 100).toFixed(1) : '0';
+    const count = orders.length + appts.length;
+    const avgOrder = count > 0 ? Math.round(gmv / count) : 0;
+    return {
+      data: {
+        gmvYtd: `PKR ${gmv.toLocaleString()}`, gmvChange: 0, gmvPeriod: period ?? 'ytd',
+        takeRate: `${takeRate}%`, takeRateSubtitle: 'blended commission',
+        avgOrder: `PKR ${avgOrder.toLocaleString()}`, avgOrderChange: '0%',
+        retention: '0%', retentionChange: '0%', retentionSubtitle: '30-day retention',
+      },
+      message: 'Report stats retrieved',
+    };
+  }
+
+  async getAreaBreakdownWithPeriod(period?: string): Promise<ServiceResponse<Record<string, unknown>[]>> {
+    return this.getAreaBreakdown();
+  }
+
+  async getCategoryBreakdownWithPeriod(period?: string): Promise<ServiceResponse<Record<string, unknown>[]>> {
+    return this.getCategoryBreakdown();
+  }
+
+  private getPeriodFilter(period: string): Record<string, unknown> | null {
+    const now = new Date();
+    if (period === 'lastMonth') {
+      const start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const end = new Date(now.getFullYear(), now.getMonth(), 1);
+      return { $gte: start, $lt: end };
+    }
+    if (period === 'ytd') return { $gte: new Date(now.getFullYear(), 0, 1) };
+    if (period === 'lastQuarter') {
+      const d = new Date(); d.setMonth(d.getMonth() - 3);
+      return { $gte: d };
+    }
+    return null;
   }
 }

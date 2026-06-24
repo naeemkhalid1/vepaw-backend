@@ -16,10 +16,10 @@ export class Listing {
 
   @Prop({
     required: true,
-    enum: ['medicine', 'food', 'treats'],
+    enum: ['medicine', 'food', 'treats', 'accessories', 'grooming', 'supplements'],
     index: true,
   })
-  category: 'medicine' | 'food' | 'treats';
+  category: string;
 
   @Prop({ required: true, min: 0 })
   price: number;
@@ -29,6 +29,9 @@ export class Listing {
 
   @Prop({ default: 0, min: 0 })
   sold: number;
+
+  @Prop({ type: String, default: null })
+  photo: string | null;
 
   @Prop({
     type: String,

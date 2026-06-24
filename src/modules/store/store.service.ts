@@ -79,7 +79,7 @@ export class StoreService {
       return {
         product: product._id,
         name: product.name,
-        photo: product.photo,
+        photo: product.photo ?? '',
         qty: item.qty,
         price: product.price,
       };

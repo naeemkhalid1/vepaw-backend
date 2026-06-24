@@ -1,6 +1,9 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
+import { JwtModule } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
 import { AdminService } from './admin.service';
+import { AuthModule } from '../auth/auth.module';
 import {
   AdminAuthController,
   AdminOverviewController,
@@ -24,6 +27,13 @@ import { Payout, PayoutSchema } from '../../database/schemas/payout.schema';
 
 @Module({
   imports: [
+    JwtModule.registerAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        secret: config.getOrThrow<string>('JWT_ACCESS_SECRET'),
+        signOptions: { expiresIn: config.get<string>('JWT_ACCESS_EXPIRES_IN', '15m') as any },
+      }),
+    }),
     MongooseModule.forFeature([
       { name: Vet.name, schema: VetSchema },
       { name: User.name, schema: UserSchema },
@@ -36,6 +46,7 @@ import { Payout, PayoutSchema } from '../../database/schemas/payout.schema';
       { name: Broadcast.name, schema: BroadcastSchema },
       { name: Payout.name, schema: PayoutSchema },
     ]),
+    forwardRef(() => AuthModule),
   ],
   controllers: [
     AdminAuthController,

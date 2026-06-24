@@ -90,6 +90,9 @@ export class VetApplication {
     index: true,
   })
   status: 'pending' | 'approved' | 'rejected';
+
+  @Prop({ type: String, default: null })
+  rejectionReason: string | null;
 }
 
 export const VetApplicationSchema = SchemaFactory.createForClass(VetApplication);

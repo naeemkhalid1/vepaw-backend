@@ -10,7 +10,9 @@ import {
   HttpStatus,
   DefaultValuePipe,
   ParseIntPipe,
+  BadRequestException,
 } from '@nestjs/common';
+import { Types } from 'mongoose';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { StoreService } from './store.service';
 import { ListProductsDto } from './dto/list-products.dto';
@@ -23,7 +25,7 @@ import { UpdateSubscriptionDto } from '../subscriptions/dto/update-subscription.
 
 @ApiTags('store')
 @ApiBearerAuth()
-@Controller('store')
+@Controller('mobile/store')
 export class StoreController {
   constructor(private readonly storeService: StoreService) {}
 
@@ -36,6 +38,7 @@ export class StoreController {
   @Get('products/:id')
   @ApiOperation({ summary: 'Get a single product' })
   getProduct(@Param('id') id: string) {
+    if (!Types.ObjectId.isValid(id)) throw new BadRequestException('Invalid product ID');
     return this.storeService.getProduct(id);
   }
 

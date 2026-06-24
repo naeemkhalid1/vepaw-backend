@@ -8,6 +8,7 @@ import {
   Param,
   Post,
   Put,
+  Query,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
@@ -28,6 +29,14 @@ import { BlockSlotsDto } from './dto/block-slots.dto';
 import { BlockDayDto } from './dto/block-day.dto';
 import { SubmitOnboardingDto } from './dto/submit-onboarding.dto';
 import { AcceptVetInviteDto } from './dto/accept-vet-invite.dto';
+import {
+  UpdateAppointmentStatusDto,
+  AddVaccinationDto,
+  RecommendProductDto,
+  UpdateListingStatusDto,
+  UpdateTeamMemberStatusDto,
+  UpdatePayoutAccountDto,
+} from './dto/update-status.dto';
 
 // ─── Schedule ──────────────────────────────────────────
 
@@ -54,6 +63,13 @@ export class VetScheduleController {
   @ApiOperation({ summary: 'Next patient details' })
   getNextPatient(@CurrentUser() user: JwtPayload) {
     return this.service.getNextPatient(user.sub);
+  }
+
+  @Post('appointments/:id/status')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Update appointment status' })
+  updateAppointmentStatus(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: UpdateAppointmentStatusDto) {
+    return this.service.updateAppointmentStatus(user.sub, id, dto.status);
   }
 }
 
@@ -89,6 +105,20 @@ export class VetPatientsController {
   @ApiOperation({ summary: 'Add visit note' })
   addNote(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: AddVisitNoteDto) {
     return this.service.addVisitNote(user.sub, id, dto);
+  }
+
+  @Post(':id/vaccinations')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Record vaccination' })
+  addVaccination(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: AddVaccinationDto) {
+    return this.service.addVaccination(user.sub, id, dto.name, dto.dateAdministered, dto.nextDueDate, dto.batchNumber);
+  }
+
+  @Post(':id/recommend')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Recommend product to pet owner' })
+  recommend(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: RecommendProductDto) {
+    return this.service.recommendProduct(user.sub, id, dto.productId, dto.ownerPhone);
   }
 }
 
@@ -132,25 +162,25 @@ export class VetEarningsController {
 
   @Get('stats')
   @ApiOperation({ summary: 'Earnings overview' })
-  getStats(@CurrentUser() user: JwtPayload) {
-    return this.service.getEarningsStats(user.sub);
+  getStats(@CurrentUser() user: JwtPayload, @Query('period') period?: string) {
+    return this.service.getEarningsWithPeriod(user.sub, 'stats', period);
   }
 
   @Get('monthly')
   @ApiOperation({ summary: 'Monthly earnings chart' })
-  getMonthly(@CurrentUser() user: JwtPayload) {
+  getMonthly(@CurrentUser() user: JwtPayload, @Query('period') period?: string) {
     return this.service.getMonthlyEarnings(user.sub);
   }
 
   @Get('peak-hours')
   @ApiOperation({ summary: 'Peak booking hours' })
-  getPeakHours(@CurrentUser() user: JwtPayload) {
+  getPeakHours(@CurrentUser() user: JwtPayload, @Query('period') period?: string) {
     return this.service.getPeakHours(user.sub);
   }
 
   @Get('pet-types')
   @ApiOperation({ summary: 'Pet type breakdown' })
-  getPetTypes(@CurrentUser() user: JwtPayload) {
+  getPetTypes(@CurrentUser() user: JwtPayload, @Query('period') period?: string) {
     return this.service.getPetTypes(user.sub);
   }
 }
@@ -180,6 +210,13 @@ export class VetPayoutsController {
   @ApiOperation({ summary: 'Payout account' })
   getAccount(@CurrentUser() user: JwtPayload) {
     return this.service.getPayoutAccount(user.sub);
+  }
+
+  @Post('withdraw')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Request withdrawal' })
+  withdraw(@CurrentUser() user: JwtPayload) {
+    return this.service.vetWithdraw(user.sub);
   }
 }
 
@@ -211,11 +248,11 @@ export class VetTeamController {
     return this.service.inviteTeamMember(user.sub, dto);
   }
 
-  @Delete(':id')
-  @HttpCode(HttpStatus.NO_CONTENT)
-  @ApiOperation({ summary: 'Remove team member' })
-  remove(@Param('id') id: string) {
-    return this.service.removeTeamMember(id);
+  @Post(':id/status')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Update team member status' })
+  updateMemberStatus(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: UpdateTeamMemberStatusDto) {
+    return this.service.updateTeamMemberStatus(user.sub, id, dto.status);
   }
 }
 
@@ -240,10 +277,12 @@ export class VetListingsController {
     return this.service.getListingStats(user.sub);
   }
 
-  @Post()
+  @Post('add')
+  @UseInterceptors(FileInterceptor('photo'))
+  @ApiConsumes('multipart/form-data')
   @ApiOperation({ summary: 'Create listing' })
-  create(@CurrentUser() user: JwtPayload, @Body() dto: CreateListingDto) {
-    return this.service.createListing(user.sub, dto);
+  create(@CurrentUser() user: JwtPayload, @Body() dto: CreateListingDto, @UploadedFile() photo?: Express.Multer.File) {
+    return this.service.createListing(user.sub, dto, photo);
   }
 
   @Put(':id')
@@ -252,11 +291,11 @@ export class VetListingsController {
     return this.service.updateListing(user.sub, id, dto);
   }
 
-  @Post(':id/toggle')
+  @Post(':id/status')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Toggle listing active/hidden' })
-  toggle(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.service.toggleListing(user.sub, id);
+  @ApiOperation({ summary: 'Update listing status' })
+  updateListingStatus(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: UpdateListingStatusDto) {
+    return this.service.updateListingStatus(user.sub, id, dto.status);
   }
 }
 
@@ -280,6 +319,13 @@ export class VetClinicSettingsController {
   updateSettings(@CurrentUser() user: JwtPayload, @Body() dto: UpdateClinicSettingsDto) {
     return this.service.updateClinicSettings(user.sub, dto);
   }
+
+  @Post('payout')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Submit new payout account' })
+  updatePayoutAccount(@CurrentUser() user: JwtPayload, @Body() dto: UpdatePayoutAccountDto) {
+    return this.service.updateVetPayoutAccount(user.sub, dto.accountNumber);
+  }
 }
 
 // ─── Availability ──────────────────────────────────────
@@ -293,8 +339,8 @@ export class VetAvailabilityController {
 
   @Get()
   @ApiOperation({ summary: 'Get availability' })
-  getAvailability(@CurrentUser() user: JwtPayload) {
-    return this.service.getAvailability(user.sub);
+  getAvailability(@CurrentUser() user: JwtPayload, @Query('date') date?: string) {
+    return this.service.getAvailability(user.sub, date);
   }
 
   @Post('block')
@@ -302,6 +348,13 @@ export class VetAvailabilityController {
   @ApiOperation({ summary: 'Block slots' })
   blockSlots(@CurrentUser() user: JwtPayload, @Body() dto: BlockSlotsDto) {
     return this.service.blockSlots(user.sub, dto);
+  }
+
+  @Post('unblock')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Unblock slots' })
+  unblockSlots(@CurrentUser() user: JwtPayload, @Body() dto: BlockSlotsDto) {
+    return this.service.unblockSlots(user.sub, dto);
   }
 
   @Post('block-day')

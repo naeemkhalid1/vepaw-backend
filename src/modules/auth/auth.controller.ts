@@ -14,6 +14,8 @@ import { LogoutDto } from './dto/logout.dto';
 import { LoginDto } from './dto/login.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { AdminLoginDto } from './dto/admin-login.dto';
+import { VerifySetPasswordTokenDto } from './dto/verify-set-password-token.dto';
+import { SetPasswordDto } from './dto/set-password.dto';
 import { Public } from '../../common/decorators/public.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { JwtPayload } from '../../shared/types';
@@ -69,5 +71,21 @@ export class AuthController {
   @ApiOperation({ summary: 'Request password reset link' })
   forgotPassword(@Body() dto: ForgotPasswordDto) {
     return this.authService.forgotPassword(dto);
+  }
+
+  @Public()
+  @Post('set-password/verify')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Verify set-password token — returns user info' })
+  verifySetPasswordToken(@Body() dto: VerifySetPasswordTokenDto) {
+    return this.authService.verifySetPasswordToken(dto);
+  }
+
+  @Public()
+  @Post('set-password')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Set password for approved vet/store account' })
+  setPassword(@Body() dto: SetPasswordDto) {
+    return this.authService.setPassword(dto);
   }
 }

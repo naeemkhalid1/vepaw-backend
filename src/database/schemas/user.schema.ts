@@ -38,6 +38,9 @@ export class User {
   @Prop({ type: String, enum: ['en', 'ur'], default: 'en' })
   language: 'en' | 'ur';
 
+  @Prop({ type: String, enum: ['user', 'admin'], default: 'user', index: true })
+  role: 'user' | 'admin';
+
   @Prop({ type: [{ type: Types.ObjectId, ref: 'Pet' }], default: [] })
   pets: Types.ObjectId[];
 

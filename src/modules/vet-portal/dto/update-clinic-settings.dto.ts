@@ -1,6 +1,6 @@
 import { IsArray, IsBoolean, IsNotEmpty, IsNumber, IsObject, IsOptional, IsString, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 class ClinicProfileDto {
   @IsString() @IsNotEmpty() clinicName: string;
@@ -23,55 +23,58 @@ class AvailabilitySettingsDto {
   @IsString() opens: string;
   @IsString() closes: string;
   @IsString() slotLength: string;
-  @IsString() lunchBreak: string;
+  @IsString() lunchStart: string;
+  @IsString() lunchEnd: string;
   @IsNumber() bookableSlotsPerDay: number;
 }
 
 class PayoutInfoDto {
   @IsString() method: string;
-  @IsString() methodInitials: string;
+  @IsOptional() @IsString() methodInitials?: string;
   @IsString() accountHolder: string;
-  @IsString() maskedNumber: string;
-  @IsString() commissionRate: string;
-  @IsString() commissionLabel: string;
+  @IsOptional() @IsString() maskedNumber?: string;
+  @IsOptional() @IsString() commissionRate?: string;
+  @IsOptional() @IsString() commissionLabel?: string;
 }
 
 class NotificationSettingDto {
   @IsString() id: string;
-  @IsString() label: string;
-  @IsString() channel: string;
-  @IsString() icon: string;
   @IsBoolean() enabled: boolean;
 }
 
 export class UpdateClinicSettingsDto {
-  @ApiProperty()
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsObject()
   @ValidateNested()
   @Type(() => ClinicProfileDto)
-  profile: ClinicProfileDto;
+  profile?: ClinicProfileDto;
 
-  @ApiProperty()
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsObject()
   @ValidateNested()
   @Type(() => ConsultationSettingsDto)
-  consultation: ConsultationSettingsDto;
+  consultation?: ConsultationSettingsDto;
 
-  @ApiProperty()
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsObject()
   @ValidateNested()
   @Type(() => AvailabilitySettingsDto)
-  availability: AvailabilitySettingsDto;
+  availability?: AvailabilitySettingsDto;
 
-  @ApiProperty()
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsObject()
   @ValidateNested()
   @Type(() => PayoutInfoDto)
-  payout: PayoutInfoDto;
+  payout?: PayoutInfoDto;
 
-  @ApiProperty()
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => NotificationSettingDto)
-  notifications: NotificationSettingDto[];
+  notifications?: NotificationSettingDto[];
 }

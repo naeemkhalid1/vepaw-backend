@@ -1,12 +1,14 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
   Param,
   Post,
   Put,
+  Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -17,6 +19,12 @@ import { UpdateCommissionTierDto } from './dto/update-commission-tier.dto';
 import { SendBroadcastDto } from './dto/send-broadcast.dto';
 import { ScheduleBroadcastDto } from './dto/schedule-broadcast.dto';
 import { AdminLoginDto } from '../auth/dto/admin-login.dto';
+import {
+  UpdateVetApplicationStatusDto,
+  UpdateStoreApplicationStatusDto,
+  UpdateUserStatusDto,
+  UpdateTransactionStatusDto,
+} from './dto/update-status.dto';
 
 // ─── Admin Auth ──────────────────────────────────────
 
@@ -83,18 +91,36 @@ export class AdminController {
     return this.service.getVetApplications();
   }
 
-  @Post('vet-applications/:id/approve')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Approve vet application' })
-  approve(@Param('id') id: string) {
-    return this.service.approveVetApplication(id);
+  @Get('vet-applications/:id')
+  @ApiOperation({ summary: 'Get vet application detail' })
+  getVetApplicationDetail(@Param('id') id: string) {
+    return this.service.getVetApplicationDetail(id);
   }
 
-  @Post('vet-applications/:id/reject')
+  @Post('vet-applications/:id/status')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Reject vet application' })
-  reject(@Param('id') id: string) {
-    return this.service.rejectVetApplication(id);
+  @ApiOperation({ summary: 'Update vet application status' })
+  updateApplicationStatus(@Param('id') id: string, @Body() dto: UpdateVetApplicationStatusDto) {
+    return this.service.updateVetApplicationStatus(id, dto.status, dto.reason);
+  }
+
+  @Get('store-applications')
+  @ApiOperation({ summary: 'List store applications' })
+  getStoreApplications() {
+    return this.service.getStoreApplications();
+  }
+
+  @Get('store-applications/:id')
+  @ApiOperation({ summary: 'Get store application detail' })
+  getStoreApplicationDetail(@Param('id') id: string) {
+    return this.service.getStoreApplicationDetail(id);
+  }
+
+  @Post('store-applications/:id/status')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Update store application status' })
+  updateStoreApplicationStatus(@Param('id') id: string, @Body() dto: UpdateStoreApplicationStatusDto) {
+    return this.service.updateStoreApplicationStatus(id, dto.status, dto.reason);
   }
 }
 
@@ -118,6 +144,13 @@ export class AdminUsersController {
   getStats() {
     return this.service.getUserStats();
   }
+
+  @Post(':id/status')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Update user status' })
+  updateUserStatus(@Param('id') id: string, @Body() dto: UpdateUserStatusDto) {
+    return this.service.updateUserStatus(id, dto.status);
+  }
 }
 
 // ─── Transactions ───────────────────────────────────────
@@ -139,6 +172,20 @@ export class AdminTransactionsController {
   @ApiOperation({ summary: 'Transaction stats' })
   getStats() {
     return this.service.getTransactionStats();
+  }
+
+  @Post(':id/status')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Admin override transaction status' })
+  updateTransactionStatus(@Param('id') id: string, @Body() dto: UpdateTransactionStatusDto) {
+    return this.service.updateTransactionStatus(id, dto.status);
+  }
+
+  @Post(':id/release')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Release escrow payout' })
+  releaseEscrow(@Param('id') id: string) {
+    return this.service.releaseEscrow(id);
   }
 }
 
@@ -174,6 +221,13 @@ export class AdminCommissionsController {
   updateTier(@Param('id') id: string, @Body() dto: UpdateCommissionTierDto) {
     return this.service.updateCommissionTier(id, dto);
   }
+
+  @Delete('tiers/:id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Delete commission tier' })
+  deleteTier(@Param('id') id: string) {
+    return this.service.deleteCommissionTier(id);
+  }
 }
 
 // ─── Broadcasts ─────────────────────────────────────────
@@ -204,6 +258,12 @@ export class AdminBroadcastsController {
   schedule(@Body() dto: ScheduleBroadcastDto) {
     return this.service.scheduleBroadcast(dto);
   }
+
+  @Get('options')
+  @ApiOperation({ summary: 'Broadcast audience and channel options' })
+  getOptions() {
+    return this.service.getBroadcastOptions();
+  }
 }
 
 // ─── Reports ────────────────────────────────────────────
@@ -217,19 +277,19 @@ export class AdminReportsController {
 
   @Get('stats')
   @ApiOperation({ summary: 'Report stats' })
-  getStats() {
-    return this.service.getReportStats();
+  getStats(@Query('period') period?: string) {
+    return this.service.getReportStatsWithPeriod(period);
   }
 
   @Get('areas')
   @ApiOperation({ summary: 'Area breakdown' })
-  getAreas() {
-    return this.service.getAreaBreakdown();
+  getAreas(@Query('period') period?: string) {
+    return this.service.getAreaBreakdownWithPeriod(period);
   }
 
   @Get('categories')
   @ApiOperation({ summary: 'Category breakdown' })
-  getCategories() {
-    return this.service.getCategoryBreakdown();
+  getCategories(@Query('period') period?: string) {
+    return this.service.getCategoryBreakdownWithPeriod(period);
   }
 }

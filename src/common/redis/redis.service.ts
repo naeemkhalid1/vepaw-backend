@@ -1,51 +1,43 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import Redis from 'ioredis';
+import { Injectable, Logger } from '@nestjs/common';
 
 @Injectable()
-export class RedisService implements OnModuleInit, OnModuleDestroy {
+export class RedisService {
   private readonly logger = new Logger(RedisService.name);
-  private client: Redis;
-
-  constructor(private readonly config: ConfigService) {}
-
-  onModuleInit(): void {
-    this.client = new Redis({
-      host: this.config.get<string>('REDIS_HOST', 'localhost'),
-      port: this.config.get<number>('REDIS_PORT', 6379),
-      password: this.config.get<string>('REDIS_PASSWORD') || undefined,
-    });
-
-    this.client.on('error', (err: Error) => {
-      this.logger.error(`Redis error: ${err.message}`);
-    });
-  }
-
-  onModuleDestroy(): void {
-    this.client.disconnect();
-  }
+  private store = new Map<string, { value: string; expiresAt?: number }>();
 
   async set(key: string, value: string, ttlSeconds?: number): Promise<void> {
-    if (ttlSeconds) {
-      await this.client.set(key, value, 'EX', ttlSeconds);
-    } else {
-      await this.client.set(key, value);
-    }
+    this.store.set(key, {
+      value,
+      expiresAt: ttlSeconds ? Date.now() + ttlSeconds * 1000 : undefined,
+    });
   }
 
   async get(key: string): Promise<string | null> {
-    return this.client.get(key);
+    const entry = this.store.get(key);
+    if (!entry) return null;
+    if (entry.expiresAt && Date.now() > entry.expiresAt) {
+      this.store.delete(key);
+      return null;
+    }
+    return entry.value;
   }
 
   async del(key: string): Promise<void> {
-    await this.client.del(key);
+    this.store.delete(key);
   }
 
   async incr(key: string): Promise<number> {
-    return this.client.incr(key);
+    const current = await this.get(key);
+    const next = (parseInt(current ?? '0', 10) || 0) + 1;
+    const entry = this.store.get(key);
+    this.store.set(key, { value: `${next}`, expiresAt: entry?.expiresAt });
+    return next;
   }
 
   async expire(key: string, ttlSeconds: number): Promise<void> {
-    await this.client.expire(key, ttlSeconds);
+    const entry = this.store.get(key);
+    if (entry) {
+      entry.expiresAt = Date.now() + ttlSeconds * 1000;
+    }
   }
 }

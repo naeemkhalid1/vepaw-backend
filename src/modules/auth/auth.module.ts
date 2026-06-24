@@ -7,6 +7,7 @@ import { User, UserSchema } from '../../database/schemas/user.schema';
 import { RefreshToken, RefreshTokenSchema } from '../../database/schemas/refresh-token.schema';
 import { Vet, VetSchema } from '../../database/schemas/vet.schema';
 import { Store, StoreSchema } from '../../database/schemas/store.schema';
+import { PasswordToken, PasswordTokenSchema } from '../../database/schemas/password-token.schema';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { SmsService } from './sms.service';
@@ -31,6 +32,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
       { name: RefreshToken.name, schema: RefreshTokenSchema },
       { name: Vet.name, schema: VetSchema },
       { name: Store.name, schema: StoreSchema },
+      { name: PasswordToken.name, schema: PasswordTokenSchema },
     ]),
   ],
   controllers: [AuthController],

@@ -188,7 +188,7 @@ export interface ProductResponse {
   store: string;
   storeName: string;
   name: string;
-  photo: string;
+  photo: string | null;
   description: string | null;
   category: string;
   petTypes: string[];

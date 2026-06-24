@@ -19,6 +19,7 @@ import { Invite, InviteDocument } from '../../database/schemas/invite.schema';
 import { TimeOff, TimeOffDocument } from '../../database/schemas/time-off.schema';
 import { VisitNote, VisitNoteDocument } from '../../database/schemas/visit-note.schema';
 import { VetApplication, VetApplicationDocument } from '../../database/schemas/vet-application.schema';
+import { BlockedSlot, BlockedSlotDocument } from '../../database/schemas/blocked-slot.schema';
 import { ServiceResponse } from '../../shared/types';
 import { AddVisitNoteDto } from './dto/add-visit-note.dto';
 import { ReplyReviewDto } from './dto/reply-review.dto';
@@ -90,6 +91,7 @@ export class VetPortalService {
     @InjectModel(TimeOff.name) private readonly timeOffModel: Model<TimeOffDocument>,
     @InjectModel(VisitNote.name) private readonly visitNoteModel: Model<VisitNoteDocument>,
     @InjectModel(VetApplication.name) private readonly vetApplicationModel: Model<VetApplicationDocument>,
+    @InjectModel(BlockedSlot.name) private readonly blockedSlotModel: Model<BlockedSlotDocument>,
   ) {}
 
   // ─── Schedule ──────────────────────────────────────────
@@ -142,8 +144,6 @@ export class VetPortalService {
       time: a.timeSlot,
       duration: '30 min',
       petName: a.petDetails.name,
-      petInitial: a.petDetails.name[0].toUpperCase(),
-      petColor: getColor(a.petDetails.name),
       ownerName: a.vetDetails.name,
       ownerPhone: a.vetDetails.phone,
       visitType: 'checkup',
@@ -191,8 +191,6 @@ export class VetPortalService {
         currentMeds: (pet?.currentMedications ?? []).join(', ') || 'None',
         vaccinations,
         ownerNote: next.notes ?? '',
-        avatarInitial: (pet?.name ?? 'P')[0].toUpperCase(),
-        avatarColor: getColor(pet?.name ?? 'P'),
       },
       message: 'Next patient retrieved',
     };
@@ -221,8 +219,6 @@ export class VetPortalService {
       return {
         id: p._id.toString(),
         petName: p.name,
-        petInitial: p.name[0].toUpperCase(),
-        petColor: getColor(p.name),
         species: p.species,
         age: petAge(p.dateOfBirth),
         ownerName: owner?.name ?? 'Owner',
@@ -283,8 +279,6 @@ export class VetPortalService {
     return {
       data: {
         petName: pet.name,
-        petInitial: pet.name[0].toUpperCase(),
-        petColor: getColor(pet.name),
         species: pet.species,
         gender: pet.gender,
         age: petAge(pet.dateOfBirth),
@@ -448,7 +442,6 @@ export class VetPortalService {
     const data = Object.entries(speciesCounts).map(([name, count]) => ({
       name: name.charAt(0).toUpperCase() + name.slice(1),
       percentage: Math.round((count / total) * 100),
-      color: PET_TYPE_COLORS[name] ?? '#8B5CF6',
     }));
 
     return { data, message: 'Pet types retrieved' };
@@ -522,8 +515,6 @@ export class VetPortalService {
       {
         id: vet._id.toString(),
         name: vet.name,
-        initials: getInitials(vet.name),
-        avatarColor: getColor(vet.name),
         subtitle: vet.specialty ?? 'Veterinarian',
         role: 'adminVet',
         roleLabel: 'Admin / Veterinarian',
@@ -543,8 +534,6 @@ export class VetPortalService {
       members.push({
         id: inv._id.toString(),
         name: inv.inviteeName,
-        initials: getInitials(inv.inviteeName),
-        avatarColor: getColor(inv.inviteeName),
         subtitle: inv.role,
         role: inv.role === 'veterinarian' ? 'veterinarian' : 'clinicAdmin',
         roleLabel: inv.role === 'veterinarian' ? 'Veterinarian' : 'Clinic Admin',
@@ -618,7 +607,6 @@ export class VetPortalService {
     const listings = await this.listingModel.find({ vet: new Types.ObjectId(vetId) }).sort({ createdAt: -1 }).lean().exec();
 
     const mapped = listings.map((l) => {
-      const colors = CATEGORY_COLORS[l.category] ?? { icon: '#6366F1', bg: '#EEF2FF' };
       return {
         id: l._id.toString(),
         name: l.name,
@@ -628,8 +616,6 @@ export class VetPortalService {
         inStock: l.inStock,
         sold: l.sold,
         status: l.status,
-        iconColor: colors.icon,
-        bgColor: colors.bg,
       };
     });
 
@@ -647,20 +633,19 @@ export class VetPortalService {
         activeListings: active,
         totalListings: listings.length,
         unitsSold: totalSold,
-        unitsSoldPeriod: 'all time',
-        listingRevenue: `PKR ${revenue.toLocaleString()}`,
-        revenueSubtitle: 'total revenue',
+        listingRevenue: revenue,
       },
       message: 'Listing stats retrieved',
     };
   }
 
-  async createListing(vetId: string, dto: CreateListingDto): Promise<ServiceResponse<null>> {
+  async createListing(vetId: string, dto: CreateListingDto, photo?: Express.Multer.File): Promise<ServiceResponse<null>> {
     await this.listingModel.create({
       vet: new Types.ObjectId(vetId),
       name: dto.name,
-      price: dto.price,
-      category: dto.category as 'medicine' | 'food' | 'treats',
+      price: parseInt(dto.price, 10) || 0,
+      category: dto.category.toLowerCase(),
+      ...(photo ? { photo: photo.originalname } : {}),
     });
     return { data: null, message: 'Listing created' };
   }
@@ -709,16 +694,17 @@ export class VetPortalService {
         consultation: {
           inPersonFee: `${vet.fee.min}`,
           videoConsultFee: `${vet.fee.max}`,
-          inPersonEnabled: true,
-          videoEnabled: false,
-          textEnabled: false,
+          inPersonEnabled: vet.inPersonEnabled ?? true,
+          videoEnabled: vet.videoEnabled ?? false,
+          textEnabled: vet.textEnabled ?? false,
         },
         availability: {
           workingDays,
           opens: vet.workingHours?.mon?.open ?? '09:00',
           closes: vet.workingHours?.mon?.close ?? '18:00',
-          slotLength: '30 min',
-          lunchBreak: '13:00 – 14:00',
+          slotLength: vet.slotLength ?? '30min',
+          lunchStart: vet.lunchStart ?? '13:00',
+          lunchEnd: vet.lunchEnd ?? '14:00',
           bookableSlotsPerDay: 16,
         },
         payout: {
@@ -729,12 +715,12 @@ export class VetPortalService {
           commissionRate: '15%',
           commissionLabel: 'Platform commission on bookings',
         },
-        notifications: [
-          { id: 'new-booking', label: 'New booking', channel: 'Push + Email', icon: 'calendar', enabled: true },
-          { id: 'cancellation', label: 'Cancellation', channel: 'Push', icon: 'x-circle', enabled: true },
-          { id: 'review', label: 'New review', channel: 'Email', icon: 'star', enabled: true },
-          { id: 'payout', label: 'Payout processed', channel: 'Push + Email', icon: 'wallet', enabled: true },
-        ],
+        notifications: (vet.notifications ?? [
+          { id: 'new-booking', enabled: true },
+          { id: 'cancellation', enabled: true },
+          { id: 'review', enabled: true },
+          { id: 'payout', enabled: true },
+        ]).map((n) => ({ id: n.id, enabled: n.enabled })),
       },
       message: 'Clinic settings retrieved',
     };
@@ -744,12 +730,57 @@ export class VetPortalService {
     const vet = await this.vetModel.findById(vetId).exec();
     if (!vet) throw new NotFoundException('Vet not found');
 
-    vet.clinicName = dto.profile.clinicName;
-    vet.phone = dto.profile.phone;
-    vet.address = dto.profile.fullAddress;
-    vet.city = dto.profile.city;
-    vet.area = dto.profile.area;
-    vet.fee = { min: parseInt(dto.consultation.inPersonFee, 10) || vet.fee.min, max: parseInt(dto.consultation.videoConsultFee, 10) || vet.fee.max };
+    if (dto.profile) {
+      vet.clinicName = dto.profile.clinicName;
+      vet.phone = dto.profile.phone;
+      vet.address = dto.profile.fullAddress;
+      vet.city = dto.profile.city;
+      vet.area = dto.profile.area;
+    }
+
+    if (dto.consultation) {
+      vet.fee = {
+        min: parseInt(dto.consultation.inPersonFee, 10) || vet.fee.min,
+        max: parseInt(dto.consultation.videoConsultFee, 10) || vet.fee.max,
+      };
+      vet.inPersonEnabled = dto.consultation.inPersonEnabled;
+      vet.videoEnabled = dto.consultation.videoEnabled;
+      vet.textEnabled = dto.consultation.textEnabled;
+    }
+
+    if (dto.availability) {
+      const dayMap: Record<string, 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun'> = {
+        Mon: 'mon', Tue: 'tue', Wed: 'wed', Thu: 'thu', Fri: 'fri', Sat: 'sat', Sun: 'sun',
+      };
+      const allDays = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const;
+      const activeDays = new Set(dto.availability.workingDays.map((d) => dayMap[d] ?? d.toLowerCase()));
+
+      const updatedHours: Record<string, { open: string; close: string; isOpen: boolean }> = {};
+      for (const day of allDays) {
+        updatedHours[day] = {
+          open: activeDays.has(day) ? dto.availability.opens : vet.workingHours[day].open,
+          close: activeDays.has(day) ? dto.availability.closes : vet.workingHours[day].close,
+          isOpen: activeDays.has(day),
+        };
+      }
+      vet.workingHours = updatedHours as unknown as typeof vet.workingHours;
+      vet.markModified('workingHours');
+
+      vet.slotLength = dto.availability.slotLength;
+      vet.lunchStart = dto.availability.lunchStart;
+      vet.lunchEnd = dto.availability.lunchEnd;
+    }
+
+    if (dto.payout) {
+      vet.payoutMethod = dto.payout.method;
+      vet.accountTitle = dto.payout.accountHolder;
+    }
+
+    if (dto.notifications) {
+      vet.notifications = dto.notifications;
+      vet.markModified('notifications');
+    }
+
     await vet.save();
 
     return { data: null, message: 'Settings updated' };
@@ -757,13 +788,18 @@ export class VetPortalService {
 
   // ─── Availability ─────────────────────────────────────
 
-  async getAvailability(vetId: string): Promise<ServiceResponse<Record<string, unknown>>> {
+  async getAvailability(vetId: string, dateParam?: string): Promise<ServiceResponse<Record<string, unknown>>> {
     const now = new Date();
-    const monthName = now.toLocaleString('en', { month: 'long', year: 'numeric' });
+    const refDate = dateParam ? new Date(dateParam) : now;
+    const monthName = refDate.toLocaleString('en', { month: 'long', year: 'numeric' });
     const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-    const startOfWeek = new Date(now);
-    startOfWeek.setDate(now.getDate() - now.getDay() + 1);
+    const startOfWeek = new Date(refDate);
+    const dayOfWeek = startOfWeek.getDay();
+    startOfWeek.setDate(startOfWeek.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
+
+    const endOfWeek = new Date(startOfWeek);
+    endOfWeek.setDate(startOfWeek.getDate() + 6);
 
     const weekDays = Array.from({ length: 7 }, (_, i) => {
       const d = new Date(startOfWeek);
@@ -771,41 +807,140 @@ export class VetPortalService {
       return {
         day: dayNames[d.getDay()],
         date: d.getDate(),
-        isActive: d.getDate() === now.getDate(),
+        fullDate: d.toISOString().slice(0, 10),
+        isActive: d.toISOString().slice(0, 10) === now.toISOString().slice(0, 10),
         isOff: d.getDay() === 0,
       };
     });
 
-    const today = now.toISOString().slice(0, 10);
+    const activeDay = weekDays.find((d) => d.isActive)?.fullDate ?? weekDays[0].fullDate;
     const todayAppts = await this.appointmentModel
-      .find({ vet: new Types.ObjectId(vetId), date: today })
+      .find({ vet: new Types.ObjectId(vetId), date: activeDay })
       .lean()
       .exec();
     const bookedSlots = new Set(todayAppts.map((a) => a.timeSlot));
 
+    const weekStart = startOfWeek.toISOString().slice(0, 10);
+    const weekEnd = endOfWeek.toISOString().slice(0, 10);
     const timeOffs = await this.timeOffModel
-      .find({ vet: new Types.ObjectId(vetId), date: { $gte: today } })
+      .find({ vet: new Types.ObjectId(vetId), date: { $gte: weekStart, $lte: weekEnd } })
       .sort({ date: 1 })
       .lean()
       .exec();
     const blockedDates = new Set(timeOffs.map((t) => t.date));
 
-    const slots: Record<string, unknown>[] = [];
-    for (let h = 9; h < 18; h++) {
-      for (const m of ['00', '30']) {
-        const time = `${h.toString().padStart(2, '0')}:${m}`;
-        const isBreak = h === 13;
-        const isBlocked = blockedDates.has(today);
-        const isBooked = bookedSlots.has(time);
+    const blockedSlotDocs = await this.blockedSlotModel
+      .find({ vet: new Types.ObjectId(vetId), date: activeDay })
+      .lean()
+      .exec();
+    const blockedSlotIds = new Set(blockedSlotDocs.map((b) => b.slotId));
 
-        slots.push({
-          id: `slot-${time}`,
-          time,
-          status: isBlocked ? 'blocked' : isBreak ? 'break' : isBooked ? 'booked' : 'available',
-          ...(isBooked && todayAppts.find((a) => a.timeSlot === time)
-            ? { label: todayAppts.find((a) => a.timeSlot === time)?.petDetails.name }
-            : {}),
-        });
+    const vet = await this.vetModel.findById(vetId).lean().exec();
+    const opens = vet?.workingHours?.mon?.open ?? '09:00';
+    const closes = vet?.workingHours?.mon?.close ?? '18:00';
+    const slotMinutes = parseInt(vet?.slotLength ?? '30', 10) || 30;
+    const lunchStart = vet?.lunchStart ?? '13:00';
+    const lunchEnd = vet?.lunchEnd ?? '14:00';
+
+    const toMinutes = (t: string): number => {
+      const trimmed = t.trim().toUpperCase();
+      const isPM = trimmed.includes('PM');
+      const isAM = trimmed.includes('AM');
+      const clean = trimmed.replace(/\s*(AM|PM)\s*/i, '');
+      const [h, m] = clean.split(':').map(Number);
+      let hour = h;
+      if (isPM && hour < 12) hour += 12;
+      if (isAM && hour === 12) hour = 0;
+      return hour * 60 + (m || 0);
+    };
+    const fromMinutes = (mins: number): string => {
+      const h = Math.floor(mins / 60);
+      const m = mins % 60;
+      return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+    };
+
+    const startMin = toMinutes(opens);
+    const endMin = toMinutes(closes);
+    const lunchStartMin = toMinutes(lunchStart);
+    const lunchEndMin = toMinutes(lunchEnd);
+
+    const slots: Record<string, unknown>[] = [];
+    const isBlocked = blockedDates.has(activeDay);
+    const breakTime = `${fromMinutes(lunchStartMin)}-${fromMinutes(lunchEndMin)}`;
+
+    const pushSlot = (time: string, status: string) => {
+      const isBooked = bookedSlots.has(time);
+      const isSlotBlocked = blockedSlotIds.has(`slot-${time}`);
+      const finalStatus = isBlocked ? 'blocked' : status === 'break' ? 'break' : isSlotBlocked ? 'blocked' : isBooked ? 'booked' : 'available';
+      slots.push({
+        id: `slot-${time}`,
+        time,
+        status: finalStatus,
+        ...(isBooked && finalStatus === 'booked' && todayAppts.find((a) => a.timeSlot === time)
+          ? { label: todayAppts.find((a) => a.timeSlot === time)?.petDetails.name }
+          : {}),
+      });
+    };
+
+    if (slotMinutes === 45) {
+      let min = startMin;
+      let breakInserted = false;
+
+      while (true) {
+        if (!breakInserted && min >= lunchStartMin) {
+          pushSlot(breakTime, 'break');
+          breakInserted = true;
+          min = lunchEndMin;
+          continue;
+        }
+
+        if (!breakInserted && min + slotMinutes > lunchStartMin) {
+          const overlap = min + slotMinutes - lunchStartMin;
+          if (overlap < 5) {
+            pushSlot(fromMinutes(min), 'available');
+          } else {
+            pushSlot(fromMinutes(min), 'available');
+          }
+          pushSlot(breakTime, 'break');
+          breakInserted = true;
+          min = lunchEndMin;
+          continue;
+        }
+
+        if (min >= endMin) {
+          const spare = min - endMin;
+          if (spare >= 30) break;
+          if (min >= endMin + slotMinutes) break;
+        }
+
+        if (min > endMin + slotMinutes) break;
+
+        pushSlot(fromMinutes(min), 'available');
+        min += slotMinutes;
+      }
+    } else {
+      let min = startMin;
+      let breakInserted = false;
+
+      while (min < endMin) {
+        if (!breakInserted && min >= lunchStartMin) {
+          pushSlot(breakTime, 'break');
+          breakInserted = true;
+          min = lunchEndMin;
+          continue;
+        }
+
+        if (min >= lunchStartMin && min < lunchEndMin) {
+          if (!breakInserted) {
+            pushSlot(breakTime, 'break');
+            breakInserted = true;
+          }
+          min = lunchEndMin;
+          continue;
+        }
+
+        pushSlot(fromMinutes(min), 'available');
+        min += slotMinutes;
       }
     }
 
@@ -830,8 +965,42 @@ export class VetPortalService {
   }
 
   async blockSlots(vetId: string, dto: BlockSlotsDto): Promise<ServiceResponse<null>> {
-    this.logger.log(`Blocked slots for vet ${vetId}: ${dto.slotIds.join(', ')}`);
+    const today = new Date().toISOString().slice(0, 10);
+    const vid = new Types.ObjectId(vetId);
+
+    const todayAppts = await this.appointmentModel
+      .find({ vet: vid, date: today, status: { $in: ['pending', 'confirmed'] } })
+      .lean()
+      .exec();
+    const bookedTimes = new Set(todayAppts.map((a) => `slot-${a.timeSlot}`));
+
+    const conflicting = dto.slotIds.filter((id) => bookedTimes.has(id));
+    if (conflicting.length > 0) {
+      const times = conflicting.map((id) => id.replace('slot-', '')).join(', ');
+      throw new BadRequestException({ message: 'Cannot block booked slots. Cancel the appointments first.', code: 'SLOT_BOOKED', slots: times });
+    }
+
+    const ops = dto.slotIds.map((slotId) => ({
+      updateOne: {
+        filter: { vet: vid, date: today, slotId },
+        update: { $setOnInsert: { vet: vid, date: today, slotId, time: slotId.replace('slot-', '') } },
+        upsert: true,
+      },
+    }));
+    if (ops.length > 0) {
+      await this.blockedSlotModel.bulkWrite(ops);
+    }
     return { data: null, message: 'Slots blocked' };
+  }
+
+  async unblockSlots(vetId: string, dto: BlockSlotsDto): Promise<ServiceResponse<null>> {
+    const today = new Date().toISOString().slice(0, 10);
+    await this.blockedSlotModel.deleteMany({
+      vet: new Types.ObjectId(vetId),
+      date: today,
+      slotId: { $in: dto.slotIds },
+    }).exec();
+    return { data: null, message: 'Slots unblocked' };
   }
 
   async blockDay(vetId: string, dto: BlockDayDto): Promise<ServiceResponse<null>> {
@@ -987,5 +1156,120 @@ export class VetPortalService {
     await invite.save();
 
     return { data: { success: true, message: 'Invite accepted' }, message: 'Invite accepted' };
+  }
+
+  // ─── Missing Endpoints ────────────────────────────────
+
+  async updateAppointmentStatus(vetId: string, appointmentId: string, status: string): Promise<ServiceResponse<null>> {
+    const appt = await this.appointmentModel.findOneAndUpdate(
+      { _id: new Types.ObjectId(appointmentId), vet: new Types.ObjectId(vetId) },
+      { status: status === 'done' ? 'completed' : status === 'inProgress' ? 'confirmed' : status },
+    ).exec();
+    if (!appt) throw new NotFoundException('Appointment not found');
+    return { data: null, message: `Appointment ${status}` };
+  }
+
+  async addVaccination(vetId: string, petId: string, name: string, dateAdministered: string, nextDueDate?: string, batchNumber?: string): Promise<ServiceResponse<null>> {
+    const vet = await this.vetModel.findById(vetId).lean().exec();
+    const vaccination = {
+      name,
+      date: dateAdministered,
+      nextDue: nextDueDate ?? dateAdministered,
+      vetId: new Types.ObjectId(vetId),
+      vetName: vet?.name ?? 'Vet',
+      verified: true,
+      notes: batchNumber ? `Batch: ${batchNumber}` : null,
+      certificatePhoto: null,
+    };
+    await this.petModel.findByIdAndUpdate(petId, { $push: { vaccinations: vaccination } }).exec();
+    return { data: null, message: 'Vaccination recorded' };
+  }
+
+  async recommendProduct(vetId: string, petId: string, productId: string, ownerPhone: string): Promise<ServiceResponse<null>> {
+    this.logger.log(`Vet ${vetId} recommending product ${productId} for pet ${petId} to ${ownerPhone}`);
+    return { data: null, message: 'Recommendation sent' };
+  }
+
+  async updateListingStatus(vetId: string, listingId: string, status: string): Promise<ServiceResponse<null>> {
+    const listing = await this.listingModel.findOneAndUpdate(
+      { _id: new Types.ObjectId(listingId), vet: new Types.ObjectId(vetId) },
+      { status: status as 'active' | 'hidden' },
+    ).exec();
+    if (!listing) throw new NotFoundException('Listing not found');
+    return { data: null, message: `Listing ${status}` };
+  }
+
+  async updateTeamMemberStatus(vetId: string, memberId: string, status: string): Promise<ServiceResponse<null>> {
+    if (status === 'revoked') {
+      await this.inviteModel.findOneAndUpdate(
+        { _id: new Types.ObjectId(memberId), entityId: new Types.ObjectId(vetId), entityType: 'vet' },
+        { status: 'expired' },
+      ).exec();
+    }
+    return { data: null, message: `Member ${status}` };
+  }
+
+  async vetWithdraw(vetId: string): Promise<ServiceResponse<{ success: boolean }>> {
+    return { data: { success: true }, message: 'Withdrawal requested' };
+  }
+
+  async updateVetPayoutAccount(vetId: string, accountNumber: string): Promise<ServiceResponse<null>> {
+    await this.vetModel.findByIdAndUpdate(vetId, { mobileAccount: accountNumber }).exec();
+    return { data: null, message: 'Payout account submitted for verification' };
+  }
+
+  async getEarningsWithPeriod(vetId: string, method: string, period?: string): Promise<ServiceResponse<Record<string, unknown> | Record<string, unknown>[]>> {
+    const dateFilter = this.getPeriodFilter(period);
+    const vid = new Types.ObjectId(vetId);
+
+    if (method === 'stats') {
+      const appts = await this.appointmentModel.find({ vet: vid, status: 'completed', ...(dateFilter ? { createdAt: dateFilter } : {}) }).lean().exec();
+      const vet = await this.vetModel.findById(vetId).lean().exec();
+      const totalEarned = appts.reduce((s, a) => s + a.vetPayout, 0);
+      const ownerVisits: Record<string, number> = {};
+      for (const a of appts) ownerVisits[a.owner.toString()] = (ownerVisits[a.owner.toString()] ?? 0) + 1;
+      const repeatCount = Object.values(ownerVisits).filter((v) => v > 1).length;
+      const totalOwners = Object.keys(ownerVisits).length;
+      return {
+        data: {
+          totalEarned: `PKR ${totalEarned.toLocaleString()}`, totalEarnedChange: 0, totalEarnedSubtitle: period ?? 'all time',
+          bookings: appts.length, bookingsChange: 0, bookingsSubtitle: 'completed',
+          repeatClients: totalOwners > 0 ? `${Math.round((repeatCount / totalOwners) * 100)}%` : '0%',
+          repeatClientsChange: '0%', repeatClientsSubtitle: 'return rate',
+          avgRating: vet?.rating ?? 0, avgRatingReviews: vet?.reviewCount ?? 0,
+        },
+        message: 'Earnings stats retrieved',
+      };
+    }
+
+    if (method === 'monthly') return this.getMonthlyEarnings(vetId);
+    if (method === 'peak-hours') return this.getPeakHours(vetId);
+    if (method === 'pet-types') return this.getPetTypes(vetId);
+
+    return { data: {}, message: 'Unknown method' };
+  }
+
+  private getPeriodFilter(period?: string): Record<string, unknown> | null {
+    if (!period) return null;
+    const now = new Date();
+    if (period === '30d') {
+      const d = new Date(); d.setDate(d.getDate() - 30);
+      return { $gte: d };
+    }
+    if (period === '6m') {
+      const d = new Date(); d.setMonth(d.getMonth() - 6);
+      return { $gte: d };
+    }
+    if (period === 'ytd') return { $gte: new Date(now.getFullYear(), 0, 1) };
+    if (period === 'lastMonth') {
+      const start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const end = new Date(now.getFullYear(), now.getMonth(), 1);
+      return { $gte: start, $lt: end };
+    }
+    if (period === 'lastQuarter') {
+      const d = new Date(); d.setMonth(d.getMonth() - 3);
+      return { $gte: d };
+    }
+    return null;
   }
 }

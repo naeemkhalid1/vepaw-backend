@@ -36,8 +36,8 @@ import {
   controllers: [
     StoreOrdersController,
     StoreSubscriptionsController,
-    StoreProductsController,
     StoreBulkImportController,
+    StoreProductsController,
     StorePayoutsController,
     StoreReviewsController,
     StoreTeamController,

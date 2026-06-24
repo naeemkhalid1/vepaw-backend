@@ -1,6 +1,6 @@
 import { IsArray, IsBoolean, IsNotEmpty, IsObject, IsOptional, IsString, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiPropertyOptional } from '@nestjs/swagger';
 
 class StoreProfileDto {
   @IsString() @IsNotEmpty() storeName: string;
@@ -11,7 +11,7 @@ class StoreProfileDto {
 }
 
 class DeliverySettingsDto {
-  @IsString() freeDeliveryOver: string;
+  @IsOptional() @IsString() freeDeliveryOver?: string;
   @IsString() deliveryFee: string;
   @IsBoolean() sameDayEnabled: boolean;
   @IsString() sameDayCutoff: string;
@@ -24,35 +24,39 @@ class BusinessHoursDto {
 }
 
 class StorePayoutInfoDto {
-  @IsString() label: string;
-  @IsString() initials: string;
-  @IsString() maskedNumber: string;
-  @IsString() subtitle: string;
-  @IsString() warning: string;
+  @IsOptional() @IsString() label?: string;
+  @IsOptional() @IsString() initials?: string;
+  @IsOptional() @IsString() maskedNumber?: string;
+  @IsOptional() @IsString() subtitle?: string;
+  @IsOptional() @IsString() warning?: string;
 }
 
 export class UpdateStoreSettingsDto {
-  @ApiProperty()
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsObject()
   @ValidateNested()
   @Type(() => StoreProfileDto)
-  profile: StoreProfileDto;
+  profile?: StoreProfileDto;
 
-  @ApiProperty()
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsObject()
   @ValidateNested()
   @Type(() => DeliverySettingsDto)
-  delivery: DeliverySettingsDto;
+  delivery?: DeliverySettingsDto;
 
-  @ApiProperty()
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsObject()
   @ValidateNested()
   @Type(() => BusinessHoursDto)
-  businessHours: BusinessHoursDto;
+  businessHours?: BusinessHoursDto;
 
-  @ApiProperty()
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsObject()
   @ValidateNested()
   @Type(() => StorePayoutInfoDto)
-  payout: StorePayoutInfoDto;
+  payout?: StorePayoutInfoDto;
 }

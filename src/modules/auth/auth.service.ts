@@ -16,6 +16,7 @@ import { User, UserDocument } from '../../database/schemas/user.schema';
 import { RefreshToken, RefreshTokenDocument } from '../../database/schemas/refresh-token.schema';
 import { Vet, VetDocument } from '../../database/schemas/vet.schema';
 import { Store, StoreDocument } from '../../database/schemas/store.schema';
+import { PasswordToken, PasswordTokenDocument } from '../../database/schemas/password-token.schema';
 import { RedisService } from '../../common/redis/redis.service';
 import { SmsService } from './sms.service';
 import { JwtPayload, ServiceResponse, UserResponse } from '../../shared/types';
@@ -27,6 +28,8 @@ import { LogoutDto } from './dto/logout.dto';
 import { LoginDto } from './dto/login.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { AdminLoginDto } from './dto/admin-login.dto';
+import { VerifySetPasswordTokenDto } from './dto/verify-set-password-token.dto';
+import { SetPasswordDto } from './dto/set-password.dto';
 
 const OTP_TTL_SECONDS = 60;
 const OTP_RATE_WINDOW_SECONDS = 600;
@@ -48,6 +51,7 @@ export class AuthService {
     private readonly refreshTokenModel: Model<RefreshTokenDocument>,
     @InjectModel(Vet.name) private readonly vetModel: Model<VetDocument>,
     @InjectModel(Store.name) private readonly storeModel: Model<StoreDocument>,
+    @InjectModel(PasswordToken.name) private readonly passwordTokenModel: Model<PasswordTokenDocument>,
     private readonly redisService: RedisService,
     private readonly jwtService: JwtService,
     private readonly config: ConfigService,
@@ -174,7 +178,7 @@ export class AuthService {
     return { accessToken, refreshToken: rawRefreshToken };
   }
 
-  async login(dto: LoginDto): Promise<ServiceResponse<{ token: string; redirectTo: string }>> {
+  async login(dto: LoginDto): Promise<ServiceResponse<{ token: string; role: string; redirectTo: string; name: string }>> {
     const vet = await this.vetModel
       .findOne({ $or: [{ email: dto.emailOrPhone }, { phone: dto.emailOrPhone }] })
       .select('+password')
@@ -185,9 +189,10 @@ export class AuthService {
       if (!valid) {
         throw new UnauthorizedException({ message: 'Invalid credentials', code: 'INVALID_CREDENTIALS' });
       }
+      const role = 'vet_admin';
       const payload: JwtPayload = { sub: vet._id.toString(), phone: vet.phone, role: 'vet' };
       const token = this.jwtService.sign(payload);
-      return { data: { token, redirectTo: '/vet/schedule' }, message: 'Login successful' };
+      return { data: { token, role, redirectTo: '/vet/schedule', name: vet.name }, message: 'Login successful' };
     }
 
     const store = await this.storeModel
@@ -199,9 +204,10 @@ export class AuthService {
       if (!valid) {
         throw new UnauthorizedException({ message: 'Invalid credentials', code: 'INVALID_CREDENTIALS' });
       }
+      const role = 'store_owner';
       const payload: JwtPayload = { sub: store._id.toString(), phone: store.phone, role: 'store' };
       const token = this.jwtService.sign(payload);
-      return { data: { token, redirectTo: '/store/orders' }, message: 'Login successful' };
+      return { data: { token, role, redirectTo: '/store/orders', name: store.ownerName }, message: 'Login successful' };
     }
 
     throw new UnauthorizedException({ message: 'Invalid credentials', code: 'INVALID_CREDENTIALS' });
@@ -212,17 +218,73 @@ export class AuthService {
     return { data: null, message: 'If that account exists, a reset link has been sent' };
   }
 
-  async adminLogin(dto: AdminLoginDto): Promise<ServiceResponse<{ token: string; redirectTo: string }>> {
-    const adminEmail = this.config.get<string>('ADMIN_EMAIL', 'admin@vepaw.pk');
-    const adminPassword = this.config.get<string>('ADMIN_PASSWORD', 'admin123');
+  async adminLogin(dto: AdminLoginDto): Promise<ServiceResponse<{ token: string; role: string; redirectTo: string; name: string }>> {
+    const admin = await this.userModel
+      .findOne({ email: dto.email, role: 'admin' })
+      .select('+password')
+      .exec();
 
-    if (dto.email !== adminEmail || dto.password !== adminPassword) {
+    if (!admin || !admin.password) {
       throw new UnauthorizedException({ message: 'Invalid credentials', code: 'INVALID_CREDENTIALS' });
     }
 
-    const payload: JwtPayload = { sub: 'admin', phone: '', role: 'admin' };
+    const valid = await bcrypt.compare(dto.password, admin.password);
+    if (!valid) {
+      throw new UnauthorizedException({ message: 'Invalid credentials', code: 'INVALID_CREDENTIALS' });
+    }
+
+    const payload: JwtPayload = { sub: admin._id.toString(), phone: admin.phone, role: 'admin' };
     const token = this.jwtService.sign(payload);
-    return { data: { token, redirectTo: '/admin/overview' }, message: 'Login successful' };
+    return { data: { token, role: 'platform_admin', redirectTo: '/admin', name: admin.name }, message: 'Login successful' };
+  }
+
+  async generateSetPasswordToken(entityType: 'vet' | 'store', entityId: string, name: string, email: string, role: string): Promise<string> {
+    const token = randomBytes(32).toString('hex');
+    const expiresAt = new Date();
+    expiresAt.setHours(expiresAt.getHours() + 72);
+
+    await this.passwordTokenModel.create({ token, email, name, entityType, entityId, role, expiresAt });
+
+    const baseUrl = this.config.get<string>('FRONTEND_URL', 'http://localhost:3000');
+    const link = `${baseUrl}/auth/set-password?token=${token}`;
+    this.logger.log(`Set-password link for ${email}: ${link}`);
+
+    return token;
+  }
+
+  async verifySetPasswordToken(dto: VerifySetPasswordTokenDto): Promise<ServiceResponse<{ name: string; email: string; role: string }>> {
+    const record = await this.passwordTokenModel.findOne({ token: dto.token, used: false }).lean().exec();
+
+    if (!record || record.expiresAt < new Date()) {
+      throw new BadRequestException({ message: 'Token is invalid or expired', code: 'TOKEN_INVALID' });
+    }
+
+    return {
+      data: { name: record.name, email: record.email, role: record.role },
+      message: 'Token verified',
+    };
+  }
+
+  async setPassword(dto: SetPasswordDto): Promise<ServiceResponse<{ success: boolean; redirectTo: string }>> {
+    const record = await this.passwordTokenModel.findOne({ token: dto.token, used: false }).exec();
+
+    if (!record || record.expiresAt < new Date()) {
+      throw new BadRequestException({ message: 'Token is invalid or expired', code: 'TOKEN_INVALID' });
+    }
+
+    const hashedPassword = await bcrypt.hash(dto.password, 10);
+
+    if (record.entityType === 'vet') {
+      await this.vetModel.findByIdAndUpdate(record.entityId, { password: hashedPassword }).exec();
+    } else {
+      await this.storeModel.findByIdAndUpdate(record.entityId, { password: hashedPassword }).exec();
+    }
+
+    record.used = true;
+    await record.save();
+
+    const redirectTo = record.entityType === 'vet' ? '/auth/vet/login' : '/auth/store/login';
+    return { data: { success: true, redirectTo }, message: 'Password set successfully' };
   }
 
   private hashToken(token: string): string {

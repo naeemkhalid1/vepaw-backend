@@ -23,6 +23,13 @@ import { StoreRegisterDto } from './dto/store-register.dto';
 import { ReplyReviewDto } from './dto/reply-review.dto';
 import { InviteTeamMemberDto } from './dto/invite-team-member.dto';
 import { AcceptStoreInviteDto } from './dto/accept-store-invite.dto';
+import {
+  UpdateOrderStatusDto,
+  UpdateSubscriptionStatusDto,
+  UpdateProductStatusDto,
+  UpdateTeamMemberStatusDto,
+  UpdatePayoutAccountDto,
+} from './dto/update-status.dto';
 
 const AVATAR_COLORS = ['#6366F1', '#F59E0B', '#10B981', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6', '#F97316'];
 
@@ -143,31 +150,13 @@ export class StorePortalService {
     };
   }
 
-  async packOrder(storeId: string, orderId: string): Promise<ServiceResponse<null>> {
+  async updateOrderStatus(storeId: string, orderId: string, status: string): Promise<ServiceResponse<null>> {
     const order = await this.orderModel.findOneAndUpdate(
-      { _id: new Types.ObjectId(orderId), store: new Types.ObjectId(storeId), status: 'confirmed' },
-      { status: 'packed' },
+      { _id: new Types.ObjectId(orderId), store: new Types.ObjectId(storeId) },
+      { status },
     ).exec();
-    if (!order) throw new NotFoundException('Order not found or cannot be packed');
-    return { data: null, message: 'Order packed' };
-  }
-
-  async dispatchOrder(storeId: string, orderId: string): Promise<ServiceResponse<null>> {
-    const order = await this.orderModel.findOneAndUpdate(
-      { _id: new Types.ObjectId(orderId), store: new Types.ObjectId(storeId), status: 'packed' },
-      { status: 'dispatched' },
-    ).exec();
-    if (!order) throw new NotFoundException('Order not found or cannot be dispatched');
-    return { data: null, message: 'Order dispatched' };
-  }
-
-  async deliverOrder(storeId: string, orderId: string): Promise<ServiceResponse<null>> {
-    const order = await this.orderModel.findOneAndUpdate(
-      { _id: new Types.ObjectId(orderId), store: new Types.ObjectId(storeId), status: 'dispatched' },
-      { status: 'delivered' },
-    ).exec();
-    if (!order) throw new NotFoundException('Order not found or cannot be delivered');
-    return { data: null, message: 'Order delivered' };
+    if (!order) throw new NotFoundException('Order not found');
+    return { data: null, message: `Order ${status}` };
   }
 
   // ─── Subscriptions ──────────────────────────────────────
@@ -271,23 +260,51 @@ export class StorePortalService {
     };
   }
 
+  async getProduct(storeId: string, productId: string): Promise<ServiceResponse<Record<string, unknown>>> {
+    const product = await this.productModel
+      .findOne({ _id: new Types.ObjectId(productId), store: new Types.ObjectId(storeId) })
+      .lean()
+      .exec();
+    if (!product) throw new NotFoundException('Product not found');
+
+    return {
+      data: {
+        id: product._id.toString(),
+        name: product.name,
+        category: product.category,
+        description: product.description,
+        price: product.price,
+        stock: product.stock ?? 0,
+        sold: product.sold ?? 0,
+        status: product.productStatus ?? 'active',
+        requiresPrescription: product.requiresPrescription ?? false,
+        batchNumber: product.batchNumber,
+        expiryDate: product.expiryDate,
+        sku: product.sku,
+        photo: product.photo,
+        inStock: product.inStock,
+      },
+      message: 'Product retrieved',
+    };
+  }
+
   async createProduct(storeId: string, dto: CreateProductDto): Promise<ServiceResponse<{ success: boolean; message: string }>> {
     const store = await this.storeModel.findById(storeId).lean().exec();
     await this.productModel.create({
       store: new Types.ObjectId(storeId),
       storeName: store?.storeName ?? '',
       name: dto.productName,
-      photo: dto.productPhoto?.name ?? '',
+      photo: dto.productPhoto?.name || null,
       description: dto.description,
-      category: dto.category,
+      category: dto.category.toLowerCase(),
       price: parseInt(dto.price, 10),
       stock: parseInt(dto.stockQuantity, 10),
       inStock: parseInt(dto.stockQuantity, 10) > 0,
       productStatus: 'active',
       requiresPrescription: dto.requiresPrescription,
-      batchNumber: dto.batchNumber ?? null,
-      expiryDate: dto.expiryDate ?? null,
-      sku: dto.sku ?? null,
+      batchNumber: dto.batchNumber || null,
+      expiryDate: dto.expiryDate || null,
+      sku: dto.sku || null,
     });
 
     return { data: { success: true, message: 'Product added successfully' }, message: 'Product created' };
@@ -299,26 +316,45 @@ export class StorePortalService {
       store: new Types.ObjectId(storeId),
       storeName: store?.storeName ?? '',
       name: dto.productName,
-      photo: dto.productPhoto?.name ?? '',
+      photo: dto.productPhoto?.name || null,
       description: dto.description,
-      category: dto.category,
+      category: dto.category.toLowerCase(),
       price: parseInt(dto.price, 10) || 0,
       stock: parseInt(dto.stockQuantity, 10) || 0,
       inStock: false,
       productStatus: 'draft',
       requiresPrescription: dto.requiresPrescription,
-      batchNumber: dto.batchNumber ?? null,
-      expiryDate: dto.expiryDate ?? null,
-      sku: dto.sku ?? null,
+      batchNumber: dto.batchNumber || null,
+      expiryDate: dto.expiryDate || null,
+      sku: dto.sku || null,
     });
 
     return { data: { success: true, message: 'Draft saved' }, message: 'Draft saved' };
   }
 
   async updateProduct(storeId: string, productId: string, dto: UpdateProductDto): Promise<ServiceResponse<null>> {
+    const update: Record<string, unknown> = {};
+    if (dto.productName !== undefined) update.name = dto.productName;
+    if (dto.category !== undefined) update.category = dto.category.toLowerCase();
+    if (dto.description !== undefined) update.description = dto.description;
+    if (dto.requiresPrescription !== undefined) update.requiresPrescription = dto.requiresPrescription;
+    if (dto.batchNumber !== undefined) update.batchNumber = dto.batchNumber || null;
+    if (dto.expiryDate !== undefined) update.expiryDate = dto.expiryDate || null;
+    if (dto.sku !== undefined) update.sku = dto.sku || null;
+    if (dto.status !== undefined) update.productStatus = dto.status;
+    if (dto.productPhoto !== undefined) update.photo = dto.productPhoto?.name || null;
+    if (dto.price !== undefined) {
+      update.price = parseInt(dto.price, 10) || 0;
+    }
+    if (dto.stockQuantity !== undefined) {
+      const stock = parseInt(dto.stockQuantity, 10) || 0;
+      update.stock = stock;
+      update.inStock = stock > 0;
+    }
+
     const updated = await this.productModel.findOneAndUpdate(
       { _id: new Types.ObjectId(productId), store: new Types.ObjectId(storeId) },
-      { $set: dto },
+      { $set: update },
     ).exec();
     if (!updated) throw new NotFoundException('Product not found');
     return { data: null, message: 'Product updated' };
@@ -491,8 +527,6 @@ export class StorePortalService {
       {
         id: store._id.toString(),
         name: store.ownerName,
-        initials: getInitials(store.ownerName),
-        avatarColor: getAvatarColor(store.ownerName),
         subtitle: store.phone,
         role: 'ownerAdmin',
         roleLabel: 'Owner / Admin',
@@ -510,8 +544,6 @@ export class StorePortalService {
       members.push({
         id: inv._id.toString(),
         name: inv.inviteeName,
-        initials: getInitials(inv.inviteeName),
-        avatarColor: getAvatarColor(inv.inviteeName),
         subtitle: inv.phone,
         role: 'fulfilmentStaff',
         roleLabel: 'Fulfilment Staff',
@@ -576,6 +608,10 @@ export class StorePortalService {
     const account = store.merchantAccount ?? '';
     const masked = account.length > 4 ? '•••• ' + account.slice(-4) : account;
 
+    const maskedPhone = account.length >= 7
+      ? account.slice(0, 4) + ' *** ' + account.slice(-4)
+      : account;
+
     return {
       data: {
         profile: {
@@ -585,14 +621,23 @@ export class StorePortalService {
           city: store.city,
           areasServed: store.areasServed,
         },
-        delivery: store.delivery,
-        businessHours: store.businessHours,
+        delivery: {
+          freeDeliveryOver: store.delivery?.freeDeliveryOver ?? '2000',
+          deliveryFee: `PKR ${store.delivery?.deliveryFee ?? '150'}`,
+          sameDayEnabled: store.delivery?.sameDayEnabled ?? false,
+          sameDayCutoff: store.delivery?.sameDayEnabled ? `Orders before ${store.delivery?.sameDayCutoff ?? '14:00'}` : 'Same-day delivery disabled',
+        },
+        businessHours: {
+          openDays: store.businessHours?.openDays ?? ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
+          opens: store.businessHours?.opens ?? '09:00',
+          closes: store.businessHours?.closes ?? '21:00',
+        },
         payout: {
           label: store.payoutMethod ?? 'JazzCash',
-          initials: getInitials(store.payoutMethod ?? 'JC'),
-          maskedNumber: masked,
+          initials: (store.payoutMethod ?? 'JazzCash').split(/(?=[A-Z])/).map((w: string) => w[0]).join('').toUpperCase(),
+          maskedNumber: maskedPhone,
           subtitle: store.ownerName,
-          warning: '',
+          warning: 'Commission: 12% per order, deducted before payout.',
         },
       },
       message: 'Settings retrieved',
@@ -603,13 +648,34 @@ export class StorePortalService {
     const store = await this.storeModel.findById(storeId).exec();
     if (!store) throw new NotFoundException('Store not found');
 
-    store.storeName = dto.profile.storeName;
-    store.phone = dto.profile.phone;
-    store.storeAddress = dto.profile.fullAddress;
-    store.city = dto.profile.city;
-    store.areasServed = dto.profile.areasServed;
-    store.delivery = dto.delivery;
-    store.businessHours = dto.businessHours;
+    if (dto.profile) {
+      store.storeName = dto.profile.storeName;
+      store.phone = dto.profile.phone;
+      store.storeAddress = dto.profile.fullAddress;
+      store.city = dto.profile.city;
+      store.areasServed = dto.profile.areasServed;
+    }
+
+    if (dto.delivery) {
+      const fee = dto.delivery.deliveryFee.replace(/[^0-9]/g, '') || '150';
+      store.delivery = {
+        freeDeliveryOver: dto.delivery.freeDeliveryOver || store.delivery?.freeDeliveryOver || '2000',
+        deliveryFee: fee,
+        sameDayEnabled: dto.delivery.sameDayEnabled,
+        sameDayCutoff: dto.delivery.sameDayCutoff.replace('Orders before ', ''),
+      };
+      store.markModified('delivery');
+    }
+
+    if (dto.businessHours) {
+      store.businessHours = {
+        openDays: dto.businessHours.openDays,
+        opens: dto.businessHours.opens,
+        closes: dto.businessHours.closes,
+      };
+      store.markModified('businessHours');
+    }
+
     await store.save();
 
     return { data: null, message: 'Settings updated' };
@@ -668,5 +734,44 @@ export class StorePortalService {
     await invite.save();
 
     return { data: { success: true, message: 'Invite accepted' }, message: 'Invite accepted' };
+  }
+
+  // ─── Missing Endpoints ────────────────────────────────
+
+  async updateSubscriptionStatus(storeId: string, subscriptionId: string, status: string): Promise<ServiceResponse<null>> {
+    const order = await this.orderModel.findOneAndUpdate(
+      { _id: new Types.ObjectId(subscriptionId), store: new Types.ObjectId(storeId), isSubscription: true },
+      { status: status === 'paused' || status === 'cancelled' ? 'cancelled' : 'confirmed' },
+    ).exec();
+    if (!order) throw new NotFoundException('Subscription not found');
+    return { data: null, message: `Subscription ${status}` };
+  }
+
+  async updateProductStatus(storeId: string, productId: string, status: string): Promise<ServiceResponse<null>> {
+    const product = await this.productModel.findOneAndUpdate(
+      { _id: new Types.ObjectId(productId), store: new Types.ObjectId(storeId) },
+      { productStatus: status, inStock: status === 'active' },
+    ).exec();
+    if (!product) throw new NotFoundException('Product not found');
+    return { data: null, message: `Product ${status}` };
+  }
+
+  async getProductCategories(): Promise<ServiceResponse<string[]>> {
+    return { data: ['Food', 'Medicine', 'Accessories', 'Treats', 'Grooming'], message: 'Categories retrieved' };
+  }
+
+  async updateTeamMemberStatus(storeId: string, memberId: string, status: string): Promise<ServiceResponse<null>> {
+    if (status === 'revoked') {
+      await this.inviteModel.findOneAndUpdate(
+        { _id: new Types.ObjectId(memberId), entityId: new Types.ObjectId(storeId), entityType: 'store' },
+        { status: 'expired' },
+      ).exec();
+    }
+    return { data: null, message: `Member ${status}` };
+  }
+
+  async updatePayoutAccount(storeId: string, accountNumber: string): Promise<ServiceResponse<null>> {
+    await this.storeModel.findByIdAndUpdate(storeId, { merchantAccount: accountNumber }).exec();
+    return { data: null, message: 'Payout account submitted for verification' };
   }
 }

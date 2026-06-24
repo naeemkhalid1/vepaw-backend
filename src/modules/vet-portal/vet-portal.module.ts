@@ -11,6 +11,7 @@ import { Invite, InviteSchema } from '../../database/schemas/invite.schema';
 import { TimeOff, TimeOffSchema } from '../../database/schemas/time-off.schema';
 import { VisitNote, VisitNoteSchema } from '../../database/schemas/visit-note.schema';
 import { VetApplication, VetApplicationSchema } from '../../database/schemas/vet-application.schema';
+import { BlockedSlot, BlockedSlotSchema } from '../../database/schemas/blocked-slot.schema';
 import { VetPortalService } from './vet-portal.service';
 import {
   VetScheduleController,
@@ -40,6 +41,7 @@ import {
       { name: TimeOff.name, schema: TimeOffSchema },
       { name: VisitNote.name, schema: VisitNoteSchema },
       { name: VetApplication.name, schema: VetApplicationSchema },
+      { name: BlockedSlot.name, schema: BlockedSlotSchema },
     ]),
   ],
   controllers: [
