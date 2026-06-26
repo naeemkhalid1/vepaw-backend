@@ -1,7 +1,7 @@
 import { Types } from 'mongoose';
 import { Product } from '../../database/schemas/product.schema';
 import { Order, OrderItem } from '../../database/schemas/order.schema';
-import { ProductResponse, OrderResponse, OrderItemResponse } from '../types';
+import { ProductResponse, ProductVariantResponse, OrderResponse, OrderItemResponse } from '../types';
 
 type ProductLean = Omit<Product, '_id'> & { _id: Types.ObjectId; createdAt: Date };
 type OrderItemLean = Omit<OrderItem, '_id'>;
@@ -32,6 +32,13 @@ export function toProductResponse(product: ProductLean): ProductResponse {
     price: product.price,
     originalPrice: product.originalPrice,
     inStock: product.inStock,
+    variants: (product.variants ?? []).map((v: { _id?: Types.ObjectId; label: string; price: number; originalPrice: number | null; inStock: boolean }): ProductVariantResponse => ({
+      id: v._id?.toString() ?? '',
+      label: v.label,
+      price: v.price,
+      originalPrice: v.originalPrice,
+      inStock: v.inStock,
+    })),
     isVetRecommended: product.isVetRecommended,
     recommendedBy: product.recommendedBy,
     createdAt: product.createdAt,

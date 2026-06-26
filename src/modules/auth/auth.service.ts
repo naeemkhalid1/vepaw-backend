@@ -76,7 +76,7 @@ export class AuthService {
       );
     }
 
-    const otp = randomInt(1000, 10000).toString();
+    const otp = this.smsService.generateOtp();
     await this.redisService.set(`otp:${dto.phone}`, otp, OTP_TTL_SECONDS);
     await this.smsService.sendOtp(dto.phone, otp);
 

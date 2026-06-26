@@ -9,8 +9,11 @@ export class OrderItem {
   @Prop({ required: true })
   name: string;
 
-  @Prop({ required: true })
+  @Prop({ default: '' })
   photo: string;
+
+  @Prop({ type: String, default: null })
+  variantId: string | null;
 
   @Prop({ required: true, min: 1 })
   qty: number;
@@ -77,7 +80,7 @@ export class Order {
   @Prop({
     type: {
       street: { type: String, required: true },
-      area: { type: String, required: true },
+      area: { type: String, default: '' },
       city: { type: String, required: true },
       label: { type: String, enum: ['Home', 'Work', 'Other', null], default: null },
     },

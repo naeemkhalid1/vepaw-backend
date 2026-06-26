@@ -43,6 +43,15 @@ export interface UserResponse {
   updatedAt: Date;
 }
 
+export interface SavedAddress {
+  id: string;
+  label: 'Home' | 'Work' | 'Other';
+  street: string;
+  area: string;
+  city: string;
+  isDefault: boolean;
+}
+
 export interface ReminderResponse {
   petId: string;
   petName: string;
@@ -183,6 +192,14 @@ export interface OrderItemResponse {
   price: number;
 }
 
+export interface ProductVariantResponse {
+  id: string;
+  label: string;
+  price: number;
+  originalPrice: number | null;
+  inStock: boolean;
+}
+
 export interface ProductResponse {
   id: string;
   store: string;
@@ -197,6 +214,7 @@ export interface ProductResponse {
   price: number;
   originalPrice: number | null;
   inStock: boolean;
+  variants: ProductVariantResponse[];
   isVetRecommended: boolean;
   recommendedBy: string | null;
   createdAt: Date;
@@ -215,7 +233,7 @@ export interface OrderResponse {
   status: string;
   paymentMethod: string;
   paymentStatus: string;
-  deliveryAddress: { street: string; area: string; city: string; label: string | null };
+  deliveryAddress: { street: string; area?: string; city: string; label: string | null };
   isSubscription: boolean;
   nextOrderDate: string | null;
   estimatedDelivery: string | null;

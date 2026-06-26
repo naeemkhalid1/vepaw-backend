@@ -1,5 +1,14 @@
-import { IsBoolean, IsOptional, IsString } from 'class-validator';
+import { IsArray, IsBoolean, IsNumber, IsOptional, IsString, ValidateNested, IsNotEmpty } from 'class-validator';
+import { Type } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
+
+class VariantDto {
+  @IsOptional() @IsString() id?: string;
+  @IsString() @IsNotEmpty() label: string;
+  @IsNumber() price: number;
+  @IsOptional() @IsNumber() originalPrice?: number;
+  @IsBoolean() inStock: boolean;
+}
 
 export class UpdateProductDto {
   @ApiPropertyOptional()
@@ -55,4 +64,11 @@ export class UpdateProductDto {
   @IsOptional()
   @IsString()
   status?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => VariantDto)
+  variants?: VariantDto[];
 }

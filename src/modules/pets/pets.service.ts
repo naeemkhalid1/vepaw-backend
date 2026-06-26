@@ -49,7 +49,9 @@ export class PetsService {
 
     const update: Record<string, unknown> = {};
     if (dto.name !== undefined) update.name = dto.name;
+    if (dto.species !== undefined) update.species = dto.species;
     if (dto.breed !== undefined) update.breed = dto.breed;
+    if (dto.gender !== undefined) update.gender = dto.gender;
     if (dto.weight !== undefined) update.weight = dto.weight;
     if (dto.color !== undefined) update.color = dto.color;
     if (dto.photo !== undefined) update.photo = dto.photo;

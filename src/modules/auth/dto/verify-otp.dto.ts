@@ -7,8 +7,8 @@ export class VerifyOtpDto {
   @Matches(/^0\d{10}$/, { message: 'Enter a valid Pakistani phone number' })
   phone: string;
 
-  @ApiProperty({ example: '4821', description: '4-digit OTP received via SMS' })
+  @ApiProperty({ example: '123456', description: '6-digit OTP received via SMS' })
   @IsString()
-  @Matches(/^\d{4}$/, { message: 'OTP must be a 4-digit code' })
+  @Matches(/^\d{4,6}$/, { message: 'OTP must be a 4 to 6 digit code' })
   otp: string;
 }

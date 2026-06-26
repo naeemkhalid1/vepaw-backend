@@ -19,6 +19,31 @@ export class OrderItemDto {
   @IsMongoId()
   product: string;
 
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  variantId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  variantLabel?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  name?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  photo?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsNumber()
+  price?: number;
+
   @ApiProperty({ example: 1 })
   @IsInt()
   @Min(1)
@@ -32,9 +57,9 @@ export class DeliveryAddressDto {
   street: string;
 
   @ApiProperty({ example: 'DHA Phase 5' })
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  area: string;
+  area?: string;
 
   @ApiProperty({ example: 'Lahore' })
   @IsString()

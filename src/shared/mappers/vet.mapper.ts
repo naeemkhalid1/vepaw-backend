@@ -27,6 +27,9 @@ export interface VetRaw {
   specializations: string[];
   languages: string[];
   workingHours: WorkingHours;
+  slotLength?: string;
+  lunchStart?: string;
+  lunchEnd?: string;
   is24Hours: boolean;
   isEmergency: boolean;
   radiusKm: number | null;

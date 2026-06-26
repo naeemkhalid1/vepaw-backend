@@ -813,7 +813,7 @@ export class VetPortalService {
       };
     });
 
-    const activeDay = weekDays.find((d) => d.isActive)?.fullDate ?? weekDays[0].fullDate;
+    const activeDay = dateParam ?? weekDays.find((d) => d.isActive)?.fullDate ?? now.toISOString().slice(0, 10);
     const todayAppts = await this.appointmentModel
       .find({ vet: new Types.ObjectId(vetId), date: activeDay })
       .lean()
@@ -965,11 +965,10 @@ export class VetPortalService {
   }
 
   async blockSlots(vetId: string, dto: BlockSlotsDto): Promise<ServiceResponse<null>> {
-    const today = new Date().toISOString().slice(0, 10);
     const vid = new Types.ObjectId(vetId);
 
     const todayAppts = await this.appointmentModel
-      .find({ vet: vid, date: today, status: { $in: ['pending', 'confirmed'] } })
+      .find({ vet: vid, date: dto.date, status: { $in: ['pending', 'confirmed'] } })
       .lean()
       .exec();
     const bookedTimes = new Set(todayAppts.map((a) => `slot-${a.timeSlot}`));
@@ -982,8 +981,8 @@ export class VetPortalService {
 
     const ops = dto.slotIds.map((slotId) => ({
       updateOne: {
-        filter: { vet: vid, date: today, slotId },
-        update: { $setOnInsert: { vet: vid, date: today, slotId, time: slotId.replace('slot-', '') } },
+        filter: { vet: vid, date: dto.date, slotId },
+        update: { $setOnInsert: { vet: vid, date: dto.date, slotId, time: slotId.replace('slot-', '') } },
         upsert: true,
       },
     }));
@@ -994,10 +993,9 @@ export class VetPortalService {
   }
 
   async unblockSlots(vetId: string, dto: BlockSlotsDto): Promise<ServiceResponse<null>> {
-    const today = new Date().toISOString().slice(0, 10);
     await this.blockedSlotModel.deleteMany({
       vet: new Types.ObjectId(vetId),
-      date: today,
+      date: dto.date,
       slotId: { $in: dto.slotIds },
     }).exec();
     return { data: null, message: 'Slots unblocked' };

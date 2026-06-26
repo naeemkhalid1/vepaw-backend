@@ -22,6 +22,11 @@ export class UpdateProfileDto {
   @IsString()
   area?: string;
 
+  @ApiPropertyOptional({ example: 'Lahore' })
+  @IsOptional()
+  @IsString()
+  city?: string;
+
   @ApiPropertyOptional({ example: 'https://cdn.vepaw.pk/avatars/user.jpg' })
   @IsOptional()
   @IsString()

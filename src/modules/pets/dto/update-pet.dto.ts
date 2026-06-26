@@ -7,10 +7,20 @@ export class UpdatePetDto {
   @IsString()
   name?: string;
 
+  @ApiPropertyOptional({ enum: ['dog', 'cat', 'bird', 'exotic', 'other'] })
+  @IsOptional()
+  @IsIn(['dog', 'cat', 'bird', 'exotic', 'other'])
+  species?: string;
+
   @ApiPropertyOptional({ example: 'Persian' })
   @IsOptional()
   @IsString()
   breed?: string;
+
+  @ApiPropertyOptional({ enum: ['male', 'female'] })
+  @IsOptional()
+  @IsIn(['male', 'female'])
+  gender?: string;
 
   @ApiPropertyOptional({ example: 4.5 })
   @IsOptional()

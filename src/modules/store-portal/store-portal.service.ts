@@ -283,6 +283,13 @@ export class StorePortalService {
         sku: product.sku,
         photo: product.photo,
         inStock: product.inStock,
+        variants: (product.variants ?? []).map((v) => ({
+          id: (v as unknown as Record<string, unknown>)._id?.toString() ?? '',
+          label: v.label,
+          price: v.price,
+          originalPrice: v.originalPrice,
+          inStock: v.inStock,
+        })),
       },
       message: 'Product retrieved',
     };
@@ -305,6 +312,7 @@ export class StorePortalService {
       batchNumber: dto.batchNumber || null,
       expiryDate: dto.expiryDate || null,
       sku: dto.sku || null,
+      variants: dto.variants ?? [],
     });
 
     return { data: { success: true, message: 'Product added successfully' }, message: 'Product created' };
@@ -327,6 +335,7 @@ export class StorePortalService {
       batchNumber: dto.batchNumber || null,
       expiryDate: dto.expiryDate || null,
       sku: dto.sku || null,
+      variants: dto.variants ?? [],
     });
 
     return { data: { success: true, message: 'Draft saved' }, message: 'Draft saved' };
@@ -351,6 +360,7 @@ export class StorePortalService {
       update.stock = stock;
       update.inStock = stock > 0;
     }
+    if (dto.variants !== undefined) update.variants = dto.variants;
 
     const updated = await this.productModel.findOneAndUpdate(
       { _id: new Types.ObjectId(productId), store: new Types.ObjectId(storeId) },

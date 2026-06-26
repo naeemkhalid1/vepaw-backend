@@ -1,6 +1,23 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
 
+@Schema({ _id: true })
+export class ProductVariant {
+  @Prop({ required: true, trim: true })
+  label: string;
+
+  @Prop({ required: true, min: 0 })
+  price: number;
+
+  @Prop({ type: Number, default: null })
+  originalPrice: number | null;
+
+  @Prop({ default: true })
+  inStock: boolean;
+}
+
+const ProductVariantSchema = SchemaFactory.createForClass(ProductVariant);
+
 export type ProductDocument = HydratedDocument<Product> & {
   createdAt: Date;
   updatedAt: Date;
@@ -73,6 +90,9 @@ export class Product {
 
   @Prop({ type: String, default: null })
   sku: string | null;
+
+  @Prop({ type: [ProductVariantSchema], default: [] })
+  variants: ProductVariant[];
 
   @Prop({ default: false })
   isVetRecommended: boolean;

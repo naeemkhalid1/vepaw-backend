@@ -4,6 +4,8 @@ import { Model, PipelineStage, Types } from 'mongoose';
 import { Vet, VetDocument } from '../../database/schemas/vet.schema';
 import { Review, ReviewDocument } from '../../database/schemas/review.schema';
 import { Appointment, AppointmentDocument } from '../../database/schemas/appointment.schema';
+import { TimeOff, TimeOffDocument } from '../../database/schemas/time-off.schema';
+import { BlockedSlot, BlockedSlotDocument } from '../../database/schemas/blocked-slot.schema';
 import {
   toEmergencyNearest,
   toEmergencyNearby,
@@ -35,6 +37,8 @@ export class VetsService {
     @InjectModel(Review.name) private readonly reviewModel: Model<ReviewDocument>,
     @InjectModel(Appointment.name)
     private readonly appointmentModel: Model<AppointmentDocument>,
+    @InjectModel(TimeOff.name) private readonly timeOffModel: Model<TimeOffDocument>,
+    @InjectModel(BlockedSlot.name) private readonly blockedSlotModel: Model<BlockedSlotDocument>,
   ) {}
 
   async listVets(dto: ListVetsDto): Promise<ServiceResponse<VetResponse[]>> {
@@ -177,13 +181,15 @@ export class VetsService {
     const dayKey = dayNames[new Date(dto.date).getDay()] as DayKey;
     const daySchedule = vet.workingHours[dayKey];
 
+    const slotDuration = parseInt(vet.slotLength ?? '30', 10) || 30;
+
     let rawSlots: string[];
     if (vet.is24Hours) {
-      rawSlots = this.generateSlots('00:00', '23:30');
+      rawSlots = this.generateSlots('00:00', '23:30', slotDuration);
     } else if (!daySchedule.isOpen) {
       return { data: [], message: 'Vet is closed on this day' };
     } else {
-      rawSlots = this.generateSlots(daySchedule.open, daySchedule.close);
+      rawSlots = this.generateSlots(daySchedule.open, daySchedule.close, slotDuration);
     }
 
     const todayStr = new Date().toISOString().split('T')[0];
@@ -197,17 +203,33 @@ export class VetsService {
       });
     }
 
-    const booked = await this.appointmentModel
-      .find({ vet: vetId, date: dto.date, status: { $in: ['pending', 'confirmed'] } })
-      .select('timeSlot')
-      .lean<{ timeSlot: string }[]>();
+    const timeOff = await this.timeOffModel
+      .findOne({ vet: new Types.ObjectId(vetId), date: dto.date })
+      .lean()
+      .exec();
+
+    if (timeOff) {
+      return { data: [], message: 'Vet is off on this day' };
+    }
+
+    const [booked, blockedSlots] = await Promise.all([
+      this.appointmentModel
+        .find({ vet: vetId, date: dto.date, status: { $in: ['pending', 'confirmed'] } })
+        .select('timeSlot')
+        .lean<{ timeSlot: string }[]>(),
+      this.blockedSlotModel
+        .find({ vet: new Types.ObjectId(vetId), date: dto.date })
+        .lean()
+        .exec(),
+    ]);
 
     const bookedSet = new Set(booked.map((a) => a.timeSlot));
+    const blockedSet = new Set(blockedSlots.map((b) => b.time));
 
     return {
       data: slots.map((time) => ({
         time,
-        status: bookedSet.has(time) ? 'booked' : 'available',
+        status: blockedSet.has(time) || bookedSet.has(time) ? 'booked' : 'available',
       })),
       message: 'Availability fetched',
     };
@@ -243,7 +265,7 @@ export class VetsService {
     };
   }
 
-  private generateSlots(open: string, close: string): string[] {
+  private generateSlots(open: string, close: string, duration = 30): string[] {
     const [openH, openM] = open.split(':').map(Number);
     const [closeH, closeM] = close.split(':').map(Number);
     const closeMinutes = closeH * 60 + closeM;
@@ -254,10 +276,10 @@ export class VetsService {
 
     while (h * 60 + m < closeMinutes) {
       slots.push(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`);
-      m += 30;
+      m += duration;
       if (m >= 60) {
-        h += 1;
-        m -= 60;
+        h += Math.floor(m / 60);
+        m = m % 60;
       }
     }
 

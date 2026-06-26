@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
 import { randomInt } from 'crypto';
 import { Product, ProductDocument } from '../../database/schemas/product.schema';
 import { Order, OrderDocument } from '../../database/schemas/order.schema';
@@ -22,17 +22,34 @@ export class StoreService {
   ) {}
 
   async listProducts(dto: ListProductsDto): Promise<ServiceResponse<ProductResponse[]>> {
-    const filter: Record<string, unknown> = { inStock: true };
+    const filter: Record<string, unknown> = { productStatus: 'active', inStock: true };
+
     if (dto.category) filter['category'] = dto.category;
     if (dto.petType) filter['petTypes'] = dto.petType;
+    if (dto.storeId) filter['store'] = new Types.ObjectId(dto.storeId);
+    if (dto.isVetRecommended === true) filter['isVetRecommended'] = true;
     if (dto.q) filter['$text'] = { $search: dto.q };
+    if (dto.minPrice !== undefined || dto.maxPrice !== undefined) {
+      const priceFilter: Record<string, number> = {};
+      if (dto.minPrice !== undefined) priceFilter['$gte'] = dto.minPrice;
+      if (dto.maxPrice !== undefined) priceFilter['$lte'] = dto.maxPrice;
+      filter['price'] = priceFilter;
+    }
+
+    const sortMap: Record<string, Record<string, 1 | -1>> = {
+      newest:     { _id: -1 },
+      price_asc:  { price: 1 },
+      price_desc: { price: -1 },
+      popular:    { sold: -1 },
+    };
+    const sort = sortMap[dto.sort ?? 'newest'];
 
     const page = dto.page ?? 1;
     const limit = dto.limit ?? 20;
     const skip = (page - 1) * limit;
 
     const [products, total] = await Promise.all([
-      this.productModel.find(filter).sort({ _id: -1 }).skip(skip).limit(limit).lean(),
+      this.productModel.find(filter).sort(sort).skip(skip).limit(limit).lean(),
       this.productModel.countDocuments(filter),
     ]);
 
@@ -74,14 +91,22 @@ export class StoreService {
       if (!product.inStock) {
         throw new UnprocessableEntityException({ code: 'OUT_OF_STOCK', message: `${product.name} is out of stock` });
       }
-      const lineTotal = product.price * item.qty;
+
+      let unitPrice = product.price;
+      if (item.variantId && product.variants?.length) {
+        const variant = product.variants.find((v) => (v as unknown as Record<string, unknown>)._id?.toString() === item.variantId);
+        if (variant) unitPrice = variant.price;
+      }
+
+      const lineTotal = unitPrice * item.qty;
       serverTotal += lineTotal;
       return {
         product: product._id,
         name: product.name,
         photo: product.photo ?? '',
+        variantId: item.variantId ?? null,
         qty: item.qty,
-        price: product.price,
+        price: unitPrice,
       };
     });
 
