@@ -8,13 +8,17 @@ import {
   Param,
   Patch,
   Post,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { ApiBearerAuth, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { PetsService } from './pets.service';
 import { CreatePetDto } from './dto/create-pet.dto';
 import { UpdatePetDto } from './dto/update-pet.dto';
 import { AddVaccinationDto } from './dto/add-vaccination.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { imageUploadOptions } from '../../common/storage/image-upload.options';
 import type { JwtPayload } from '../../shared/types';
 
 @ApiTags('pets')
@@ -24,9 +28,15 @@ export class PetsController {
   constructor(private readonly petsService: PetsService) {}
 
   @Post()
+  @UseInterceptors(FileInterceptor('photo', imageUploadOptions))
+  @ApiConsumes('multipart/form-data')
   @ApiOperation({ summary: 'Create a new pet' })
-  createPet(@CurrentUser() user: JwtPayload, @Body() dto: CreatePetDto) {
-    return this.petsService.createPet(user.sub, dto);
+  createPet(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: CreatePetDto,
+    @UploadedFile() photo?: Express.Multer.File,
+  ) {
+    return this.petsService.createPet(user.sub, dto, photo);
   }
 
   @Get(':id')
@@ -36,13 +46,16 @@ export class PetsController {
   }
 
   @Patch(':id')
+  @UseInterceptors(FileInterceptor('photo', imageUploadOptions))
+  @ApiConsumes('multipart/form-data')
   @ApiOperation({ summary: 'Update pet — all fields optional' })
   updatePet(
     @CurrentUser() user: JwtPayload,
     @Param('id') petId: string,
     @Body() dto: UpdatePetDto,
+    @UploadedFile() photo?: Express.Multer.File,
   ) {
-    return this.petsService.updatePet(user.sub, petId, dto);
+    return this.petsService.updatePet(user.sub, petId, dto, photo);
   }
 
   @Delete(':id')

@@ -1,4 +1,4 @@
-import { IsArray, IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { IsArray, IsIn, IsNotEmpty, IsOptional, IsString } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class UpdateAppointmentStatusDto {
@@ -36,10 +36,11 @@ export class RecommendProductDto {
   @IsNotEmpty()
   productId: string;
 
-  @ApiProperty()
+  @ApiProperty({ enum: ['own_listing', 'store_product'], required: false })
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  ownerPhone: string;
+  @IsIn(['own_listing', 'store_product'])
+  source?: 'own_listing' | 'store_product';
 }
 
 export class UpdateListingStatusDto {

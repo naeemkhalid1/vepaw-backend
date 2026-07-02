@@ -27,11 +27,6 @@ export class UpdateProfileDto {
   @IsString()
   city?: string;
 
-  @ApiPropertyOptional({ example: 'https://cdn.vepaw.pk/avatars/user.jpg' })
-  @IsOptional()
-  @IsString()
-  profilePhoto?: string;
-
   @ApiPropertyOptional({ enum: ['en', 'ur'] })
   @IsOptional()
   @IsIn(['en', 'ur'])

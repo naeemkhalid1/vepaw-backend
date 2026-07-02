@@ -28,6 +28,7 @@ export function toMessageResponse(m: Message & { _id: Types.ObjectId; createdAt:
     sender: m.sender,
     text: m.text,
     product: m.product ?? null,
+    pet: m.pet ?? null,
     createdAt: m.createdAt,
   };
 }

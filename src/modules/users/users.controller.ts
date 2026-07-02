@@ -1,5 +1,18 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Patch,
+  Post,
+  UploadedFile,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { ApiBearerAuth, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { UsersService } from './users.service';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { UpdateFcmTokenDto } from './dto/update-fcm-token.dto';
@@ -8,6 +21,7 @@ import { UpdateNotificationsDto } from './dto/update-notifications.dto';
 import { CreateAddressDto } from './dto/create-address.dto';
 import { UpdateAddressDto } from './dto/update-address.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { imageUploadOptions } from '../../common/storage/image-upload.options';
 import type { JwtPayload } from '../../shared/types';
 
 @ApiTags('users')
@@ -23,9 +37,15 @@ export class UsersController {
   }
 
   @Patch('me')
+  @UseInterceptors(FileInterceptor('profilePhoto', imageUploadOptions))
+  @ApiConsumes('multipart/form-data')
   @ApiOperation({ summary: 'Update profile — all fields optional' })
-  updateProfile(@CurrentUser() user: JwtPayload, @Body() dto: UpdateProfileDto) {
-    return this.usersService.updateProfile(user.sub, dto);
+  updateProfile(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: UpdateProfileDto,
+    @UploadedFile() profilePhoto?: Express.Multer.File,
+  ) {
+    return this.usersService.updateProfile(user.sub, dto, profilePhoto);
   }
 
   @Patch('fcm-token')

@@ -118,7 +118,7 @@ export class VetPatientsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Recommend product to pet owner' })
   recommend(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: RecommendProductDto) {
-    return this.service.recommendProduct(user.sub, id, dto.productId, dto.ownerPhone);
+    return this.service.recommendProduct(user.sub, id, dto.productId, dto.source);
   }
 }
 
@@ -401,6 +401,38 @@ export class VetOnboardingController {
   @ApiOperation({ summary: 'Upload onboarding document' })
   upload(@UploadedFile() file: Express.Multer.File) {
     return this.service.uploadFile(file);
+  }
+}
+
+// ─── Chat ─────────────────────────────────────────────
+
+@ApiTags('vet-chat')
+@Controller('vet/chat')
+@ApiBearerAuth()
+@Roles('vet')
+export class VetChatController {
+  constructor(private readonly service: VetPortalService) {}
+
+  @Get('patient/:patientId/messages')
+  @ApiOperation({ summary: 'Fetch chat history for a vet-patient conversation' })
+  getMessages(@CurrentUser() user: JwtPayload, @Param('patientId') patientId: string) {
+    return this.service.getThreadMessages(user.sub, patientId);
+  }
+}
+
+// ─── Recommend ────────────────────────────────────────
+
+@ApiTags('vet-recommend')
+@Controller('vet/recommend')
+@ApiBearerAuth()
+@Roles('vet')
+export class VetRecommendController {
+  constructor(private readonly service: VetPortalService) {}
+
+  @Get('search')
+  @ApiOperation({ summary: 'Search own listings + store products for recommendation' })
+  search(@CurrentUser() user: JwtPayload, @Query('q') q: string) {
+    return this.service.searchRecommendProducts(user.sub, q ?? '');
   }
 }
 

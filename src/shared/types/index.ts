@@ -265,13 +265,36 @@ export interface ThreadResponse {
   updatedAt: Date;
 }
 
+export interface ProductRecommendationPayload {
+  id: string;
+  name: string;
+  pricePKR: number;
+  storeId: string;
+  storeName: string;
+  source: 'own_listing' | 'store_product' | null;
+}
+
+export interface PetSharePayload {
+  petId: string;
+  name: string;
+  species: string;
+  breed: string;
+  age: string;
+  weight: number;
+  gender: string;
+  vaccinationStatus: string | null;
+  allergies: string[];
+  currentMedications: string[];
+}
+
 export interface MessageResponse {
   id: string;
   thread: string;
-  type: 'text' | 'product_recommendation';
+  type: 'text' | 'product_recommendation' | 'pet_share';
   sender: 'user' | 'doctor' | 'ai';
   text: string | null;
-  product: { id: string; name: string; pricePKR: number; storeId: string; storeName: string } | null;
+  product: ProductRecommendationPayload | null;
+  pet: PetSharePayload | null;
   createdAt: Date;
 }
 

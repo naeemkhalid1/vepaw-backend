@@ -1,5 +1,6 @@
 import { IsIn, IsNotEmpty, IsNumber, IsPositive, IsString, Matches } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
 
 export class CreatePetDto {
   @ApiProperty({ example: 'Simba' })
@@ -21,6 +22,7 @@ export class CreatePetDto {
   dateOfBirth: string;
 
   @ApiProperty({ example: 4.2, description: 'Weight in kg' })
+  @Type(() => Number)
   @IsNumber()
   @IsPositive()
   weight: number;

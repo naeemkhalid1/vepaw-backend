@@ -11,6 +11,7 @@ import { UpdatePrivacyDto } from './dto/update-privacy.dto';
 import { UpdateNotificationsDto } from './dto/update-notifications.dto';
 import { CreateAddressDto } from './dto/create-address.dto';
 import { UpdateAddressDto } from './dto/update-address.dto';
+import { S3Service } from '../../common/storage/s3.service';
 
 const REMINDER_WINDOW_DAYS = 30;
 
@@ -19,6 +20,7 @@ export class UsersService {
   constructor(
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     @InjectModel(Pet.name) private readonly petModel: Model<PetDocument>,
+    private readonly s3Service: S3Service,
   ) {}
 
   async getProfile(userId: string): Promise<ServiceResponse<Record<string, unknown>>> {
@@ -58,6 +60,7 @@ export class UsersService {
   async updateProfile(
     userId: string,
     dto: UpdateProfileDto,
+    profilePhoto?: Express.Multer.File,
   ): Promise<ServiceResponse<UserResponse>> {
     const update: Record<string, unknown> = {};
     if (dto.name !== undefined) update.name = dto.name;
@@ -65,8 +68,8 @@ export class UsersService {
     if (dto.gender !== undefined) update.gender = dto.gender;
     if (dto.area !== undefined) update.area = dto.area;
     if (dto.city !== undefined) update.city = dto.city;
-    if (dto.profilePhoto !== undefined) update.profilePhoto = dto.profilePhoto;
     if (dto.language !== undefined) update.language = dto.language;
+    if (profilePhoto) update.profilePhoto = await this.s3Service.uploadImage(profilePhoto, 'avatars');
 
     const user = await this.userModel
       .findByIdAndUpdate(userId, { $set: update }, { new: true, runValidators: true })

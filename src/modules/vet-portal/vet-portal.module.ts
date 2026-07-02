@@ -12,6 +12,10 @@ import { TimeOff, TimeOffSchema } from '../../database/schemas/time-off.schema';
 import { VisitNote, VisitNoteSchema } from '../../database/schemas/visit-note.schema';
 import { VetApplication, VetApplicationSchema } from '../../database/schemas/vet-application.schema';
 import { BlockedSlot, BlockedSlotSchema } from '../../database/schemas/blocked-slot.schema';
+import { Thread, ThreadSchema } from '../../database/schemas/thread.schema';
+import { Message, MessageSchema } from '../../database/schemas/message.schema';
+import { Product, ProductSchema } from '../../database/schemas/product.schema';
+import { RealtimeModule } from '../realtime/realtime.module';
 import { VetPortalService } from './vet-portal.service';
 import {
   VetScheduleController,
@@ -25,6 +29,8 @@ import {
   VetAvailabilityController,
   VetOnboardingController,
   VetInviteController,
+  VetChatController,
+  VetRecommendController,
 } from './vet-portal.controller';
 
 @Module({
@@ -42,7 +48,11 @@ import {
       { name: VisitNote.name, schema: VisitNoteSchema },
       { name: VetApplication.name, schema: VetApplicationSchema },
       { name: BlockedSlot.name, schema: BlockedSlotSchema },
+      { name: Thread.name, schema: ThreadSchema },
+      { name: Message.name, schema: MessageSchema },
+      { name: Product.name, schema: ProductSchema },
     ]),
+    RealtimeModule,
   ],
   controllers: [
     VetScheduleController,
@@ -56,6 +66,8 @@ import {
     VetAvailabilityController,
     VetOnboardingController,
     VetInviteController,
+    VetChatController,
+    VetRecommendController,
   ],
   providers: [VetPortalService],
 })

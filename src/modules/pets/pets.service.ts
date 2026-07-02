@@ -8,15 +8,23 @@ import { PetResponse, ServiceResponse, VaccinationResponse } from '../../shared/
 import { CreatePetDto } from './dto/create-pet.dto';
 import { UpdatePetDto } from './dto/update-pet.dto';
 import { AddVaccinationDto } from './dto/add-vaccination.dto';
+import { S3Service } from '../../common/storage/s3.service';
 
 @Injectable()
 export class PetsService {
   constructor(
     @InjectModel(Pet.name) private readonly petModel: Model<PetDocument>,
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
+    private readonly s3Service: S3Service,
   ) {}
 
-  async createPet(userId: string, dto: CreatePetDto): Promise<ServiceResponse<PetResponse>> {
+  async createPet(
+    userId: string,
+    dto: CreatePetDto,
+    photo?: Express.Multer.File,
+  ): Promise<ServiceResponse<PetResponse>> {
+    const photoUrl = photo ? await this.s3Service.uploadImage(photo, 'pets') : null;
+
     const pet = await this.petModel.create({
       owner: new Types.ObjectId(userId),
       name: dto.name,
@@ -25,6 +33,7 @@ export class PetsService {
       dateOfBirth: dto.dateOfBirth,
       weight: dto.weight,
       gender: dto.gender,
+      photo: photoUrl,
     });
 
     await this.userModel.updateOne(
@@ -44,6 +53,7 @@ export class PetsService {
     userId: string,
     petId: string,
     dto: UpdatePetDto,
+    photo?: Express.Multer.File,
   ): Promise<ServiceResponse<PetResponse>> {
     await this.findOwnedPet(userId, petId);
 
@@ -54,11 +64,11 @@ export class PetsService {
     if (dto.gender !== undefined) update.gender = dto.gender;
     if (dto.weight !== undefined) update.weight = dto.weight;
     if (dto.color !== undefined) update.color = dto.color;
-    if (dto.photo !== undefined) update.photo = dto.photo;
     if (dto.vaccinationStatus !== undefined) update.vaccinationStatus = dto.vaccinationStatus;
     if (dto.allergies !== undefined) update.allergies = dto.allergies;
     if (dto.currentMedications !== undefined) update.currentMedications = dto.currentMedications;
     if (dto.remindersEnabled !== undefined) update.remindersEnabled = dto.remindersEnabled;
+    if (photo) update.photo = await this.s3Service.uploadImage(photo, 'pets');
 
     const updated = await this.petModel
       .findByIdAndUpdate(petId, { $set: update }, { new: true, runValidators: true })

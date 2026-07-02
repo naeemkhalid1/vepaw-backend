@@ -20,7 +20,11 @@ import { TimeOff, TimeOffDocument } from '../../database/schemas/time-off.schema
 import { VisitNote, VisitNoteDocument } from '../../database/schemas/visit-note.schema';
 import { VetApplication, VetApplicationDocument } from '../../database/schemas/vet-application.schema';
 import { BlockedSlot, BlockedSlotDocument } from '../../database/schemas/blocked-slot.schema';
-import { ServiceResponse } from '../../shared/types';
+import { Thread, ThreadDocument } from '../../database/schemas/thread.schema';
+import { Message, MessageDocument } from '../../database/schemas/message.schema';
+import { Product, ProductDocument } from '../../database/schemas/product.schema';
+import { ChatGateway } from '../realtime/gateways/chat.gateway';
+import { ServiceResponse, MessageResponse } from '../../shared/types';
 import { AddVisitNoteDto } from './dto/add-visit-note.dto';
 import { ReplyReviewDto } from './dto/reply-review.dto';
 import { InviteTeamMemberDto } from './dto/invite-team-member.dto';
@@ -92,6 +96,10 @@ export class VetPortalService {
     @InjectModel(VisitNote.name) private readonly visitNoteModel: Model<VisitNoteDocument>,
     @InjectModel(VetApplication.name) private readonly vetApplicationModel: Model<VetApplicationDocument>,
     @InjectModel(BlockedSlot.name) private readonly blockedSlotModel: Model<BlockedSlotDocument>,
+    @InjectModel(Thread.name) private readonly threadModel: Model<ThreadDocument>,
+    @InjectModel(Message.name) private readonly messageModel: Model<MessageDocument>,
+    @InjectModel(Product.name) private readonly productModel: Model<ProductDocument>,
+    private readonly chatGateway: ChatGateway,
   ) {}
 
   // ─── Schedule ──────────────────────────────────────────
@@ -1183,8 +1191,188 @@ export class VetPortalService {
     return { data: null, message: 'Vaccination recorded' };
   }
 
-  async recommendProduct(vetId: string, petId: string, productId: string, ownerPhone: string): Promise<ServiceResponse<null>> {
-    this.logger.log(`Vet ${vetId} recommending product ${productId} for pet ${petId} to ${ownerPhone}`);
+  async getThreadMessages(vetId: string, patientId: string): Promise<ServiceResponse<Record<string, unknown>[]>> {
+    // patientId is the pet's _id — resolve to owner then find the thread
+    const pet = await this.petModel.findById(patientId).select('owner').lean().exec();
+    if (!pet) throw new NotFoundException('Patient not found');
+
+    const vetObjectId = new Types.ObjectId(vetId);
+    const ownerObjectId = pet.owner as Types.ObjectId;
+
+    let thread = await this.threadModel.findOne({
+      user: ownerObjectId,
+      vetId: vetObjectId,
+      type: 'vet',
+    }).lean().exec();
+
+    // no thread yet means no messages — return empty with the threadId null
+    if (!thread) {
+      return { data: [], message: 'No messages yet' };
+    }
+
+    const threadId = (thread._id as Types.ObjectId).toString();
+
+    const [messages, vet, owner] = await Promise.all([
+      this.messageModel.find({ thread: thread._id }).sort({ createdAt: 1 }).lean().exec(),
+      this.vetModel.findById(vetId).select('name').lean().exec(),
+      this.userModel.findById(ownerObjectId).select('name').lean().exec(),
+    ]);
+
+    const vetName = vet?.name ?? 'Vet';
+    const ownerName = owner?.name ?? 'Owner';
+
+    const data = messages.map((m) => {
+      const isVet = m.sender === 'doctor';
+      return {
+        id: (m._id as Types.ObjectId).toString(),
+        threadId,
+        type: m.type,
+        text: m.text ?? undefined,
+        senderRole: isVet ? 'vet' : 'owner',
+        senderName: isVet ? vetName : ownerName,
+        sentAt: (m as unknown as { createdAt: Date }).createdAt,
+        product: m.product
+          ? { name: m.product.name, category: null, price: m.product.pricePKR }
+          : undefined,
+        pet: m.pet ?? undefined,
+      };
+    });
+
+    return { data, message: 'Messages retrieved' };
+  }
+
+  async searchRecommendProducts(
+    vetId: string,
+    q: string,
+  ): Promise<ServiceResponse<Record<string, unknown>[]>> {
+    const pattern = new RegExp(q, 'i');
+    const vid = new Types.ObjectId(vetId);
+
+    const [listings, products] = await Promise.all([
+      this.listingModel.find({ vet: vid, status: 'active', name: pattern }).limit(10).lean().exec(),
+      this.productModel.find({ name: pattern, inStock: true }).limit(10).lean().exec(),
+    ]);
+
+    const results: Record<string, unknown>[] = [
+      ...listings.map((l) => ({
+        id: (l._id as Types.ObjectId).toString(),
+        name: l.name,
+        price: l.price,
+        photo: l.photo,
+        source: 'own_listing',
+        storeId: vetId,
+        storeName: null,
+      })),
+      ...products.map((p) => ({
+        id: (p._id as Types.ObjectId).toString(),
+        name: p.name,
+        price: p.price,
+        photo: p.photo,
+        source: 'store_product',
+        storeId: (p.store as Types.ObjectId).toString(),
+        storeName: p.storeName,
+      })),
+    ];
+
+    return { data: results, message: 'Search results' };
+  }
+
+  async recommendProduct(
+    vetId: string,
+    petId: string,
+    productId: string,
+    source?: 'own_listing' | 'store_product',
+  ): Promise<ServiceResponse<null>> {
+    const vet = await this.vetModel.findById(vetId).lean().exec();
+    if (!vet) throw new NotFoundException('Vet not found');
+
+    const pet = await this.petModel.findById(petId).select('owner').lean().exec();
+    if (!pet) throw new NotFoundException('Pet not found');
+
+    const owner = await this.userModel.findById(pet.owner).lean().exec();
+    if (!owner) throw new NotFoundException('Owner not found');
+
+    // resolve product details — auto-detect source if not explicitly provided:
+    // try own listing first (scoped to this vet), then fall back to store product
+    let productDetails: {
+      id: string;
+      name: string;
+      pricePKR: number;
+      storeId: string;
+      storeName: string;
+      source: 'own_listing' | 'store_product';
+    };
+
+    const tryListing = source !== 'store_product'
+      ? await this.listingModel.findOne({ _id: new Types.ObjectId(productId), vet: new Types.ObjectId(vetId) }).lean().exec()
+      : null;
+
+    if (tryListing) {
+      productDetails = {
+        id: (tryListing._id as Types.ObjectId).toString(),
+        name: tryListing.name,
+        pricePKR: tryListing.price,
+        storeId: vetId,
+        storeName: vet.clinicName,
+        source: 'own_listing',
+      };
+    } else {
+      const product = await this.productModel.findById(productId).lean().exec();
+      if (!product) throw new NotFoundException('Product not found');
+      productDetails = {
+        id: (product._id as Types.ObjectId).toString(),
+        name: product.name,
+        pricePKR: product.price,
+        storeId: (product.store as Types.ObjectId).toString(),
+        storeName: product.storeName,
+        source: 'store_product',
+      };
+    }
+
+    const vetObjectId = new Types.ObjectId(vetId);
+    const ownerObjectId = owner._id as Types.ObjectId;
+
+    // find or create the vet consultation thread for this owner
+    let thread = await this.threadModel.findOne({ user: ownerObjectId, vetId: vetObjectId, type: 'vet' }).lean().exec();
+    if (!thread) {
+      const created = await this.threadModel.create({
+        user: ownerObjectId,
+        type: 'vet',
+        name: vet.name,
+        vetId: vetObjectId,
+        verified: vet.verified ?? false,
+      });
+      thread = created.toObject();
+    }
+
+    const message = await this.messageModel.create({
+      thread: thread._id,
+      type: 'product_recommendation',
+      sender: 'doctor',
+      text: null,
+      product: productDetails,
+      pet: null,
+    });
+
+    await this.threadModel.findByIdAndUpdate(thread._id, {
+      preview: `Recommended: ${productDetails.name}`,
+      $inc: { unread: 1 },
+    });
+
+    const threadId = (thread._id as Types.ObjectId).toString();
+    const response: MessageResponse = {
+      id: (message._id as Types.ObjectId).toString(),
+      thread: threadId,
+      type: 'product_recommendation',
+      sender: 'doctor',
+      text: null,
+      product: productDetails,
+      pet: null,
+      createdAt: (message as MessageDocument).createdAt,
+    };
+
+    this.chatGateway.server.to(threadId).emit('message:received', response);
+
     return { data: null, message: 'Recommendation sent' };
   }
 
