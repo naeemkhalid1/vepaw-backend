@@ -29,6 +29,14 @@ export function toMessageResponse(m: Message & { _id: Types.ObjectId; createdAt:
     text: m.text,
     product: m.product ?? null,
     pet: m.pet ?? null,
+    clinicRequest: m.clinicRequest
+      ? {
+          requestId: (m.clinicRequest.requestId as unknown as Types.ObjectId).toString(),
+          itemName: m.clinicRequest.itemName,
+          qty: m.clinicRequest.qty,
+          status: m.clinicRequest.status,
+        }
+      : null,
     createdAt: m.createdAt,
   };
 }

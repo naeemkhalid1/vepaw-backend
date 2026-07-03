@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -23,8 +24,10 @@ import { BlockedSlot, BlockedSlotDocument } from '../../database/schemas/blocked
 import { Thread, ThreadDocument } from '../../database/schemas/thread.schema';
 import { Message, MessageDocument } from '../../database/schemas/message.schema';
 import { Product, ProductDocument } from '../../database/schemas/product.schema';
+import { ClinicDispense, ClinicDispenseDocument } from '../../database/schemas/clinic-dispense.schema';
+import { toClinicDispenseResponse } from '../../shared/mappers/clinic-request.mapper';
 import { ChatGateway } from '../realtime/gateways/chat.gateway';
-import { ServiceResponse, MessageResponse } from '../../shared/types';
+import { ServiceResponse, MessageResponse, PetSharePayload, ClinicDispenseResponse } from '../../shared/types';
 import { AddVisitNoteDto } from './dto/add-visit-note.dto';
 import { ReplyReviewDto } from './dto/reply-review.dto';
 import { InviteTeamMemberDto } from './dto/invite-team-member.dto';
@@ -99,6 +102,7 @@ export class VetPortalService {
     @InjectModel(Thread.name) private readonly threadModel: Model<ThreadDocument>,
     @InjectModel(Message.name) private readonly messageModel: Model<MessageDocument>,
     @InjectModel(Product.name) private readonly productModel: Model<ProductDocument>,
+    @InjectModel(ClinicDispense.name) private readonly clinicDispenseModel: Model<ClinicDispenseDocument>,
     private readonly chatGateway: ChatGateway,
   ) {}
 
@@ -1235,6 +1239,7 @@ export class VetPortalService {
           ? { name: m.product.name, category: null, price: m.product.pricePKR }
           : undefined,
         pet: m.pet ?? undefined,
+        clinicRequest: m.clinicRequest ?? undefined,
       };
     });
 
@@ -1286,11 +1291,16 @@ export class VetPortalService {
     const vet = await this.vetModel.findById(vetId).lean().exec();
     if (!vet) throw new NotFoundException('Vet not found');
 
-    const pet = await this.petModel.findById(petId).select('owner').lean().exec();
+    const pet = await this.petModel.findById(petId).lean().exec();
     if (!pet) throw new NotFoundException('Pet not found');
 
     const owner = await this.userModel.findById(pet.owner).lean().exec();
     if (!owner) throw new NotFoundException('Owner not found');
+
+    const petPayload: PetSharePayload = {
+      petId: (pet._id as Types.ObjectId).toString(),
+      name: pet.name,
+    };
 
     // resolve product details — auto-detect source if not explicitly provided:
     // try own listing first (scoped to this vet), then fall back to store product
@@ -1351,11 +1361,11 @@ export class VetPortalService {
       sender: 'doctor',
       text: null,
       product: productDetails,
-      pet: null,
+      pet: petPayload,
     });
 
     await this.threadModel.findByIdAndUpdate(thread._id, {
-      preview: `Recommended: ${productDetails.name}`,
+      preview: `Recommended: ${productDetails.name} for ${petPayload.name}`,
       $inc: { unread: 1 },
     });
 
@@ -1367,13 +1377,130 @@ export class VetPortalService {
       sender: 'doctor',
       text: null,
       product: productDetails,
-      pet: null,
+      pet: petPayload,
+      clinicRequest: null,
       createdAt: (message as MessageDocument).createdAt,
     };
 
     this.chatGateway.server.to(threadId).emit('message:received', response);
 
     return { data: null, message: 'Recommendation sent' };
+  }
+
+  // ─── Clinic requests ────────────────────────────────────
+
+  async getClinicRequests(
+    vetId: string,
+    status?: string,
+  ): Promise<ServiceResponse<ClinicDispenseResponse[]>> {
+    const filter: Record<string, unknown> = { vet: new Types.ObjectId(vetId) };
+    if (status) filter.status = status;
+
+    const requests = await this.clinicDispenseModel.find(filter).sort({ createdAt: -1 }).lean().exec();
+    if (requests.length === 0) return { data: [], message: 'Requests retrieved' };
+
+    const petIds = [...new Set(requests.map((r) => (r.pet as Types.ObjectId).toString()))];
+    const [pets, vet] = await Promise.all([
+      this.petModel.find({ _id: { $in: petIds } }).select('name').lean().exec(),
+      this.vetModel.findById(vetId).select('name').lean().exec(),
+    ]);
+    const petNames = new Map(pets.map((p) => [(p._id as Types.ObjectId).toString(), p.name]));
+    const vetName = vet?.name ?? 'Vet';
+
+    const data = requests.map((r) =>
+      toClinicDispenseResponse(r, petNames.get((r.pet as Types.ObjectId).toString()) ?? 'Pet', vetName),
+    );
+
+    return { data, message: 'Requests retrieved' };
+  }
+
+  private async transitionClinicRequest(
+    vetId: string,
+    requestId: string,
+    fromStatus: 'requested' | 'confirmed',
+    toStatus: 'confirmed' | 'declined' | 'dispensed',
+    timestampField: 'confirmedAt' | 'declinedAt' | 'dispensedAt',
+  ): Promise<ClinicDispenseDocument> {
+    const request = await this.clinicDispenseModel.findById(requestId).exec();
+    if (!request) throw new NotFoundException({ message: 'Request not found', code: 'REQUEST_NOT_FOUND' });
+    if (request.vet.toString() !== vetId) {
+      throw new ForbiddenException({ message: 'This request does not belong to you', code: 'FORBIDDEN' });
+    }
+    if (request.status !== fromStatus) {
+      throw new BadRequestException({
+        message: `Request must be ${fromStatus} to perform this action`,
+        code: 'INVALID_STATUS',
+      });
+    }
+
+    request.status = toStatus;
+    request[timestampField] = new Date();
+    await request.save();
+
+    const message = await this.messageModel.create({
+      thread: request.thread,
+      type: 'clinic_request',
+      sender: 'doctor',
+      text: null,
+      clinicRequest: {
+        requestId: request._id,
+        itemName: request.itemName,
+        qty: request.qty,
+        status: toStatus,
+      },
+    });
+
+    const threadId = (request.thread as Types.ObjectId).toString();
+    const previewByStatus: Record<string, string> = {
+      confirmed: `Confirmed: ${request.itemName}`,
+      declined: `Declined: ${request.itemName}`,
+      dispensed: `Dispensed: ${request.itemName}`,
+    };
+    await this.threadModel.findByIdAndUpdate(request.thread, {
+      preview: previewByStatus[toStatus],
+      $inc: { unread: 1 },
+    });
+
+    const response: MessageResponse = {
+      id: (message._id as Types.ObjectId).toString(),
+      thread: threadId,
+      type: 'clinic_request',
+      sender: 'doctor',
+      text: null,
+      product: null,
+      pet: null,
+      clinicRequest: {
+        requestId: (request._id as Types.ObjectId).toString(),
+        itemName: request.itemName,
+        qty: request.qty,
+        status: toStatus,
+      },
+      createdAt: (message as MessageDocument).createdAt,
+    };
+    this.chatGateway.server.to(threadId).emit('message:received', response);
+
+    return request;
+  }
+
+  async confirmClinicRequest(vetId: string, requestId: string): Promise<ServiceResponse<null>> {
+    await this.transitionClinicRequest(vetId, requestId, 'requested', 'confirmed', 'confirmedAt');
+    return { data: null, message: 'Request confirmed' };
+  }
+
+  async declineClinicRequest(vetId: string, requestId: string): Promise<ServiceResponse<null>> {
+    await this.transitionClinicRequest(vetId, requestId, 'requested', 'declined', 'declinedAt');
+    return { data: null, message: 'Request declined' };
+  }
+
+  async dispenseClinicRequest(vetId: string, requestId: string): Promise<ServiceResponse<null>> {
+    const request = await this.transitionClinicRequest(vetId, requestId, 'confirmed', 'dispensed', 'dispensedAt');
+
+    await this.listingModel.updateOne(
+      { _id: request.listing },
+      { $inc: { inStock: -request.qty, sold: request.qty } },
+    );
+
+    return { data: null, message: 'Request marked as dispensed' };
   }
 
   async updateListingStatus(vetId: string, listingId: string, status: string): Promise<ServiceResponse<null>> {

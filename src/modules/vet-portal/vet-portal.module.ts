@@ -15,6 +15,7 @@ import { BlockedSlot, BlockedSlotSchema } from '../../database/schemas/blocked-s
 import { Thread, ThreadSchema } from '../../database/schemas/thread.schema';
 import { Message, MessageSchema } from '../../database/schemas/message.schema';
 import { Product, ProductSchema } from '../../database/schemas/product.schema';
+import { ClinicDispense, ClinicDispenseSchema } from '../../database/schemas/clinic-dispense.schema';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { VetPortalService } from './vet-portal.service';
 import {
@@ -31,6 +32,7 @@ import {
   VetInviteController,
   VetChatController,
   VetRecommendController,
+  VetRequestsController,
 } from './vet-portal.controller';
 
 @Module({
@@ -51,6 +53,7 @@ import {
       { name: Thread.name, schema: ThreadSchema },
       { name: Message.name, schema: MessageSchema },
       { name: Product.name, schema: ProductSchema },
+      { name: ClinicDispense.name, schema: ClinicDispenseSchema },
     ]),
     RealtimeModule,
   ],
@@ -68,6 +71,7 @@ import {
     VetInviteController,
     VetChatController,
     VetRecommendController,
+    VetRequestsController,
   ],
   providers: [VetPortalService],
 })

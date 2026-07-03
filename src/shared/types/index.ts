@@ -277,25 +277,54 @@ export interface ProductRecommendationPayload {
 export interface PetSharePayload {
   petId: string;
   name: string;
-  species: string;
-  breed: string;
-  age: string;
-  weight: number;
-  gender: string;
-  vaccinationStatus: string | null;
-  allergies: string[];
-  currentMedications: string[];
+  species?: string | null;
+  breed?: string | null;
+  age?: string | null;
+  weight?: number | null;
+  gender?: string | null;
+  vaccinationStatus?: string | null;
+  allergies?: string[];
+  currentMedications?: string[];
+}
+
+export interface ClinicRequestPayload {
+  requestId: string;
+  itemName: string;
+  qty: number;
+  status: 'requested' | 'confirmed' | 'declined' | 'dispensed' | 'cancelled';
 }
 
 export interface MessageResponse {
   id: string;
   thread: string;
-  type: 'text' | 'product_recommendation' | 'pet_share';
+  type: 'text' | 'product_recommendation' | 'pet_share' | 'clinic_request';
   sender: 'user' | 'doctor' | 'ai';
   text: string | null;
   product: ProductRecommendationPayload | null;
   pet: PetSharePayload | null;
+  clinicRequest: ClinicRequestPayload | null;
   createdAt: Date;
+}
+
+export interface ClinicDispenseResponse {
+  id: string;
+  owner: string;
+  pet: string;
+  petName: string;
+  vet: string;
+  vetName: string;
+  listing: string;
+  itemName: string;
+  unitPrice: number;
+  qty: number;
+  totalPrice: number;
+  status: 'requested' | 'confirmed' | 'declined' | 'dispensed' | 'cancelled';
+  confirmedAt: Date | null;
+  dispensedAt: Date | null;
+  declinedAt: Date | null;
+  cancelledAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 export interface PostResponse {

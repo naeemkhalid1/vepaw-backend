@@ -28,17 +28,38 @@ const ProductRecommendationSchema = SchemaFactory.createForClass(ProductRecommen
 class PetShare {
   @Prop({ required: true }) petId: string;
   @Prop({ required: true }) name: string;
-  @Prop({ required: true }) species: string;
-  @Prop({ required: true }) breed: string;
-  @Prop({ required: true }) age: string;
-  @Prop({ required: true }) weight: number;
-  @Prop({ required: true }) gender: string;
+  @Prop({ type: String, default: null }) species: string | null;
+  @Prop({ type: String, default: null }) breed: string | null;
+  @Prop({ type: String, default: null }) age: string | null;
+  @Prop({ type: Number, default: null }) weight: number | null;
+  @Prop({ type: String, default: null }) gender: string | null;
   @Prop({ type: String, default: null }) vaccinationStatus: string | null;
   @Prop({ type: [String], default: [] }) allergies: string[];
   @Prop({ type: [String], default: [] }) currentMedications: string[];
 }
 
 const PetShareSchema = SchemaFactory.createForClass(PetShare);
+
+@Schema({ _id: false })
+class ClinicRequest {
+  @Prop({ type: Types.ObjectId, ref: 'ClinicDispense', required: true })
+  requestId: Types.ObjectId;
+
+  @Prop({ required: true })
+  itemName: string;
+
+  @Prop({ required: true })
+  qty: number;
+
+  @Prop({
+    type: String,
+    enum: ['requested', 'confirmed', 'declined', 'dispensed', 'cancelled'],
+    required: true,
+  })
+  status: 'requested' | 'confirmed' | 'declined' | 'dispensed' | 'cancelled';
+}
+
+const ClinicRequestSchema = SchemaFactory.createForClass(ClinicRequest);
 
 export type MessageDocument = HydratedDocument<Message> & { createdAt: Date };
 
@@ -47,8 +68,12 @@ export class Message {
   @Prop({ type: Types.ObjectId, ref: 'Thread', required: true, index: true })
   thread: Types.ObjectId;
 
-  @Prop({ type: String, enum: ['text', 'product_recommendation', 'pet_share'], required: true })
-  type: 'text' | 'product_recommendation' | 'pet_share';
+  @Prop({
+    type: String,
+    enum: ['text', 'product_recommendation', 'pet_share', 'clinic_request'],
+    required: true,
+  })
+  type: 'text' | 'product_recommendation' | 'pet_share' | 'clinic_request';
 
   @Prop({ type: String, enum: ['user', 'doctor', 'ai'], required: true })
   sender: 'user' | 'doctor' | 'ai';
@@ -61,6 +86,9 @@ export class Message {
 
   @Prop({ type: PetShareSchema, default: null })
   pet: PetShare | null;
+
+  @Prop({ type: ClinicRequestSchema, default: null })
+  clinicRequest: ClinicRequest | null;
 }
 
 export const MessageSchema = SchemaFactory.createForClass(Message);

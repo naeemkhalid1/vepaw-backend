@@ -436,6 +436,43 @@ export class VetRecommendController {
   }
 }
 
+// ─── Clinic requests ──────────────────────────────────
+
+@ApiTags('vet-requests')
+@Controller('vet/requests')
+@ApiBearerAuth()
+@Roles('vet')
+export class VetRequestsController {
+  constructor(private readonly service: VetPortalService) {}
+
+  @Get()
+  @ApiOperation({ summary: 'List clinic item requests for this vet' })
+  getRequests(@CurrentUser() user: JwtPayload, @Query('status') status?: string) {
+    return this.service.getClinicRequests(user.sub, status);
+  }
+
+  @Post(':id/confirm')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Confirm a pending clinic request' })
+  confirm(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.service.confirmClinicRequest(user.sub, id);
+  }
+
+  @Post(':id/decline')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Decline a pending clinic request' })
+  decline(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.service.declineClinicRequest(user.sub, id);
+  }
+
+  @Post(':id/dispense')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Mark a confirmed clinic request as dispensed — decrements listing stock' })
+  dispense(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.service.dispenseClinicRequest(user.sub, id);
+  }
+}
+
 // ─── Invite ──────────────────────────────────────────
 
 @ApiTags('vet-invite')
