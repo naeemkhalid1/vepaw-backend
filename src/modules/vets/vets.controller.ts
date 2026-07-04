@@ -6,6 +6,8 @@ import { NearbyVetsDto } from './dto/nearby-vets.dto';
 import { EmergencyVetsDto } from './dto/emergency-vets.dto';
 import { GetAvailabilityDto } from './dto/get-availability.dto';
 import { ListReviewsDto } from './dto/list-reviews.dto';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import type { JwtPayload } from '../../shared/types';
 
 @ApiTags('vets')
 @ApiBearerAuth()
@@ -33,8 +35,8 @@ export class VetsController {
 
   @Get(':id')
   @ApiOperation({ summary: 'Get vet detail' })
-  getVet(@Param('id') vetId: string) {
-    return this.vetsService.getVet(vetId);
+  getVet(@CurrentUser() user: JwtPayload, @Param('id') vetId: string) {
+    return this.vetsService.getVet(vetId, user.sub);
   }
 
   @Get(':id/availability')

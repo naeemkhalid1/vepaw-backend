@@ -16,6 +16,10 @@ import { Thread, ThreadSchema } from '../../database/schemas/thread.schema';
 import { Message, MessageSchema } from '../../database/schemas/message.schema';
 import { Product, ProductSchema } from '../../database/schemas/product.schema';
 import { ClinicDispense, ClinicDispenseSchema } from '../../database/schemas/clinic-dispense.schema';
+import {
+  ConsultationSession,
+  ConsultationSessionSchema,
+} from '../../database/schemas/consultation-session.schema';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { VetPortalService } from './vet-portal.service';
 import {
@@ -33,6 +37,7 @@ import {
   VetChatController,
   VetRecommendController,
   VetRequestsController,
+  VetConsultationsController,
 } from './vet-portal.controller';
 
 @Module({
@@ -54,6 +59,7 @@ import {
       { name: Message.name, schema: MessageSchema },
       { name: Product.name, schema: ProductSchema },
       { name: ClinicDispense.name, schema: ClinicDispenseSchema },
+      { name: ConsultationSession.name, schema: ConsultationSessionSchema },
     ]),
     RealtimeModule,
   ],
@@ -72,6 +78,7 @@ import {
     VetChatController,
     VetRecommendController,
     VetRequestsController,
+    VetConsultationsController,
   ],
   providers: [VetPortalService],
 })

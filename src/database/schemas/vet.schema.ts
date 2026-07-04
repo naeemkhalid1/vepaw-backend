@@ -117,6 +117,9 @@ export class Vet {
   @Prop({ default: false })
   textEnabled: boolean;
 
+  @Prop({ type: Number, default: null })
+  textConsultFee: number | null;
+
   @Prop({ default: '30 min' })
   slotLength: string;
 

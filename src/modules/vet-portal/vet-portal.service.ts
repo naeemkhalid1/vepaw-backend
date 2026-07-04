@@ -25,9 +25,20 @@ import { Thread, ThreadDocument } from '../../database/schemas/thread.schema';
 import { Message, MessageDocument } from '../../database/schemas/message.schema';
 import { Product, ProductDocument } from '../../database/schemas/product.schema';
 import { ClinicDispense, ClinicDispenseDocument } from '../../database/schemas/clinic-dispense.schema';
+import {
+  ConsultationSession,
+  ConsultationSessionDocument,
+} from '../../database/schemas/consultation-session.schema';
 import { toClinicDispenseResponse } from '../../shared/mappers/clinic-request.mapper';
+import { toConsultationSessionResponse } from '../../shared/mappers/consultation.mapper';
 import { ChatGateway } from '../realtime/gateways/chat.gateway';
-import { ServiceResponse, MessageResponse, PetSharePayload, ClinicDispenseResponse } from '../../shared/types';
+import {
+  ServiceResponse,
+  MessageResponse,
+  PetSharePayload,
+  ClinicDispenseResponse,
+  ConsultationSessionResponse,
+} from '../../shared/types';
 import { AddVisitNoteDto } from './dto/add-visit-note.dto';
 import { ReplyReviewDto } from './dto/reply-review.dto';
 import { InviteTeamMemberDto } from './dto/invite-team-member.dto';
@@ -103,6 +114,8 @@ export class VetPortalService {
     @InjectModel(Message.name) private readonly messageModel: Model<MessageDocument>,
     @InjectModel(Product.name) private readonly productModel: Model<ProductDocument>,
     @InjectModel(ClinicDispense.name) private readonly clinicDispenseModel: Model<ClinicDispenseDocument>,
+    @InjectModel(ConsultationSession.name)
+    private readonly consultationModel: Model<ConsultationSessionDocument>,
     private readonly chatGateway: ChatGateway,
   ) {}
 
@@ -287,6 +300,9 @@ export class VetPortalService {
 
     const hasPendingVax = (pet.vaccinations ?? []).some((v) => new Date(v.nextDue) <= new Date());
     const hasOverdue = (pet.vaccinations ?? []).some((v) => new Date(v.nextDue) < new Date());
+    const nextApptOverdue = nextAppt
+      ? new Date(`${nextAppt.date}T${nextAppt.timeSlot}:00`) < new Date()
+      : false;
 
     return {
       data: {
@@ -301,9 +317,11 @@ export class VetPortalService {
         ownerPhone: owner?.phone ?? '',
         ownerArea: owner?.area ?? '',
         allergies: pet.allergies ?? [],
+        nextAppointmentId: nextAppt ? (nextAppt._id as Types.ObjectId).toString() : '',
         nextAppointmentDate: nextAppt?.date ?? '',
         nextAppointmentTime: nextAppt?.timeSlot ?? '',
         nextAppointmentType: 'checkup',
+        nextAppointmentOverdue: nextApptOverdue,
         visitHistory: notes.map((n) => ({
           id: n._id.toString(),
           title: n.title,
@@ -706,6 +724,7 @@ export class VetPortalService {
         consultation: {
           inPersonFee: `${vet.fee.min}`,
           videoConsultFee: `${vet.fee.max}`,
+          textConsultFee: vet.textConsultFee != null ? `${vet.textConsultFee}` : '',
           inPersonEnabled: vet.inPersonEnabled ?? true,
           videoEnabled: vet.videoEnabled ?? false,
           textEnabled: vet.textEnabled ?? false,
@@ -755,6 +774,9 @@ export class VetPortalService {
         min: parseInt(dto.consultation.inPersonFee, 10) || vet.fee.min,
         max: parseInt(dto.consultation.videoConsultFee, 10) || vet.fee.max,
       };
+      if (dto.consultation.textConsultFee !== undefined) {
+        vet.textConsultFee = parseInt(dto.consultation.textConsultFee, 10) || null;
+      }
       vet.inPersonEnabled = dto.consultation.inPersonEnabled;
       vet.videoEnabled = dto.consultation.videoEnabled;
       vet.textEnabled = dto.consultation.textEnabled;
@@ -1171,9 +1193,22 @@ export class VetPortalService {
   // ─── Missing Endpoints ────────────────────────────────
 
   async updateAppointmentStatus(vetId: string, appointmentId: string, status: string): Promise<ServiceResponse<null>> {
+    const statusMap: Record<string, 'pending' | 'confirmed' | 'completed' | 'cancelled' | 'no-show'> = {
+      confirmed: 'confirmed',
+      inProgress: 'confirmed',
+      done: 'completed',
+      cancelled: 'cancelled',
+      noShow: 'no-show',
+    };
+    const mappedStatus = statusMap[status];
+    if (!mappedStatus) {
+      throw new BadRequestException({ message: 'Invalid appointment status', code: 'INVALID_STATUS' });
+    }
+
     const appt = await this.appointmentModel.findOneAndUpdate(
       { _id: new Types.ObjectId(appointmentId), vet: new Types.ObjectId(vetId) },
-      { status: status === 'done' ? 'completed' : status === 'inProgress' ? 'confirmed' : status },
+      { status: mappedStatus },
+      { runValidators: true },
     ).exec();
     if (!appt) throw new NotFoundException('Appointment not found');
     return { data: null, message: `Appointment ${status}` };
@@ -1240,6 +1275,7 @@ export class VetPortalService {
           : undefined,
         pet: m.pet ?? undefined,
         clinicRequest: m.clinicRequest ?? undefined,
+        consultationStatus: m.consultationStatus ?? undefined,
       };
     });
 
@@ -1379,6 +1415,7 @@ export class VetPortalService {
       product: productDetails,
       pet: petPayload,
       clinicRequest: null,
+      consultationStatus: null,
       createdAt: (message as MessageDocument).createdAt,
     };
 
@@ -1475,6 +1512,7 @@ export class VetPortalService {
         qty: request.qty,
         status: toStatus,
       },
+      consultationStatus: null,
       createdAt: (message as MessageDocument).createdAt,
     };
     this.chatGateway.server.to(threadId).emit('message:received', response);
@@ -1501,6 +1539,123 @@ export class VetPortalService {
     );
 
     return { data: null, message: 'Request marked as dispensed' };
+  }
+
+  // ─── Paid text consultations ───────────────────────────
+
+  async getVetConsultations(
+    vetId: string,
+    status?: string,
+  ): Promise<ServiceResponse<ConsultationSessionResponse[]>> {
+    const filter: Record<string, unknown> = { vet: new Types.ObjectId(vetId) };
+    if (status) filter.status = status;
+
+    const sessions = await this.consultationModel.find(filter).sort({ createdAt: -1 }).lean().exec();
+    if (sessions.length === 0) return { data: [], message: 'Consultations retrieved' };
+
+    const petIds = [...new Set(sessions.map((s) => (s.pet as Types.ObjectId).toString()))];
+    const [pets, vet] = await Promise.all([
+      this.petModel.find({ _id: { $in: petIds } }).select('name').lean().exec(),
+      this.vetModel.findById(vetId).lean().exec(),
+    ]);
+    const petNames = new Map(pets.map((p) => [(p._id as Types.ObjectId).toString(), p.name]));
+
+    const data = sessions.map((s) =>
+      toConsultationSessionResponse(s, petNames.get((s.pet as Types.ObjectId).toString()) ?? 'Pet', vet?.name ?? 'Vet', vet),
+    );
+
+    return { data, message: 'Consultations retrieved' };
+  }
+
+  private async postConsultationStatusMessage(
+    session: ConsultationSessionDocument,
+    sender: 'user' | 'doctor',
+    status: ConsultationSessionDocument['status'],
+    previewText: string,
+  ): Promise<void> {
+    const threadId = session.thread as Types.ObjectId;
+
+    const message = await this.messageModel.create({
+      thread: threadId,
+      type: 'consultation_status',
+      sender,
+      text: null,
+      consultationStatus: {
+        sessionId: session._id,
+        status,
+      },
+    });
+
+    await this.threadModel.findByIdAndUpdate(threadId, {
+      preview: previewText,
+      $inc: { unread: 1 },
+    });
+
+    const response: MessageResponse = {
+      id: (message._id as Types.ObjectId).toString(),
+      thread: threadId.toString(),
+      type: 'consultation_status',
+      sender,
+      text: null,
+      product: null,
+      pet: null,
+      clinicRequest: null,
+      consultationStatus: {
+        sessionId: (session._id as Types.ObjectId).toString(),
+        status,
+      },
+      createdAt: (message as MessageDocument).createdAt,
+    };
+
+    this.chatGateway.server.to(threadId.toString()).emit('message:received', response);
+  }
+
+  async markConsultationPaid(vetId: string, sessionId: string): Promise<ServiceResponse<null>> {
+    const session = await this.consultationModel.findById(sessionId).exec();
+    if (!session) throw new NotFoundException({ message: 'Session not found', code: 'SESSION_NOT_FOUND' });
+    if (session.vet.toString() !== vetId) {
+      throw new ForbiddenException({ message: 'This session does not belong to you', code: 'FORBIDDEN' });
+    }
+    if (session.status !== 'payment_submitted') {
+      throw new BadRequestException({
+        message: 'Session must have a submitted payment proof to be verified',
+        code: 'INVALID_STATUS',
+      });
+    }
+
+    const now = new Date();
+    session.status = 'active';
+    session.paidAt = now;
+    session.startedAt = now;
+    session.autoExpireAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    await session.save();
+
+    await this.postConsultationStatusMessage(session, 'doctor', 'active', 'Paid consultation started');
+
+    return { data: null, message: 'Consultation activated' };
+  }
+
+  async endConsultation(vetId: string, sessionId: string): Promise<ServiceResponse<null>> {
+    const session = await this.consultationModel.findById(sessionId).exec();
+    if (!session) throw new NotFoundException({ message: 'Session not found', code: 'SESSION_NOT_FOUND' });
+    if (session.vet.toString() !== vetId) {
+      throw new ForbiddenException({ message: 'This session does not belong to you', code: 'FORBIDDEN' });
+    }
+    if (session.status !== 'active') {
+      throw new BadRequestException({
+        message: 'Only an active session can be ended',
+        code: 'INVALID_STATUS',
+      });
+    }
+
+    session.status = 'closed';
+    session.closedBy = 'vet';
+    session.closedAt = new Date();
+    await session.save();
+
+    await this.postConsultationStatusMessage(session, 'doctor', 'closed', 'Consultation ended');
+
+    return { data: null, message: 'Consultation ended' };
   }
 
   async updateListingStatus(vetId: string, listingId: string, status: string): Promise<ServiceResponse<null>> {

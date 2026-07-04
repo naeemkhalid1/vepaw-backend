@@ -4,9 +4,11 @@ import {
   HttpException,
   HttpStatus,
   Injectable,
+  Logger,
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { Appointment, AppointmentDocument } from '../../database/schemas/appointment.schema';
@@ -23,8 +25,13 @@ import { SubmitReviewDto } from './dto/submit-review.dto';
 // Configurable platform commission — move to ConfigService when fee tiers are introduced
 const PLATFORM_COMMISSION_PKR = 150;
 
+// How long past the scheduled time an unresolved appointment is treated as a no-show
+const NO_SHOW_GRACE_MS = 2 * 60 * 60 * 1000;
+
 @Injectable()
 export class AppointmentsService {
+  private readonly logger = new Logger(AppointmentsService.name);
+
   constructor(
     @InjectModel(Appointment.name)
     private readonly appointmentModel: Model<AppointmentDocument>,
@@ -32,6 +39,38 @@ export class AppointmentsService {
     @InjectModel(Vet.name) private readonly vetModel: Model<VetDocument>,
     @InjectModel(Pet.name) private readonly petModel: Model<PetDocument>,
   ) {}
+
+  @Cron(CronExpression.EVERY_HOUR)
+  async markStaleAppointmentsNoShow(): Promise<void> {
+    const now = new Date();
+    const todayStr = now.toISOString().slice(0, 10);
+
+    const pastDayResult = await this.appointmentModel.updateMany(
+      { status: { $in: ['pending', 'confirmed'] }, date: { $lt: todayStr } },
+      { $set: { status: 'no-show' } },
+    );
+
+    const todaysAppointments = await this.appointmentModel
+      .find({ status: { $in: ['pending', 'confirmed'] }, date: todayStr })
+      .lean()
+      .exec();
+
+    const staleTodayIds = todaysAppointments
+      .filter((a) => new Date(`${a.date}T${a.timeSlot}:00`).getTime() < now.getTime() - NO_SHOW_GRACE_MS)
+      .map((a) => a._id);
+
+    if (staleTodayIds.length > 0) {
+      await this.appointmentModel.updateMany(
+        { _id: { $in: staleTodayIds } },
+        { $set: { status: 'no-show' } },
+      );
+    }
+
+    const total = pastDayResult.modifiedCount + staleTodayIds.length;
+    if (total > 0) {
+      this.logger.log(`Marked ${total} stale appointment(s) as no-show`);
+    }
+  }
 
   async createAppointment(
     userId: string,

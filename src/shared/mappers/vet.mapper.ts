@@ -21,6 +21,10 @@ export interface VetRaw {
   city: string;
   area: string;
   fee: { min: number; max: number };
+  inPersonEnabled?: boolean;
+  videoEnabled?: boolean;
+  textEnabled?: boolean;
+  textConsultFee?: number | null;
   specialty: string | null;
   about: string | null;
   yearsExperience: number | null;
@@ -73,6 +77,10 @@ export function toVetResponse(raw: VetRaw): VetResponse {
     city: raw.city,
     area: raw.area,
     fee: raw.fee,
+    inPersonEnabled: raw.inPersonEnabled ?? true,
+    videoEnabled: raw.videoEnabled ?? false,
+    textEnabled: raw.textEnabled ?? false,
+    textConsultFee: raw.textConsultFee ?? null,
     specialty: raw.specialty,
     about: raw.about,
     yearsExperience: raw.yearsExperience,

@@ -61,6 +61,21 @@ class ClinicRequest {
 
 const ClinicRequestSchema = SchemaFactory.createForClass(ClinicRequest);
 
+@Schema({ _id: false })
+class ConsultationStatus {
+  @Prop({ type: Types.ObjectId, ref: 'ConsultationSession', required: true })
+  sessionId: Types.ObjectId;
+
+  @Prop({
+    type: String,
+    enum: ['pending_payment', 'payment_submitted', 'active', 'closed', 'expired'],
+    required: true,
+  })
+  status: 'pending_payment' | 'payment_submitted' | 'active' | 'closed' | 'expired';
+}
+
+const ConsultationStatusSchema = SchemaFactory.createForClass(ConsultationStatus);
+
 export type MessageDocument = HydratedDocument<Message> & { createdAt: Date };
 
 @Schema({ timestamps: true })
@@ -70,10 +85,10 @@ export class Message {
 
   @Prop({
     type: String,
-    enum: ['text', 'product_recommendation', 'pet_share', 'clinic_request'],
+    enum: ['text', 'product_recommendation', 'pet_share', 'clinic_request', 'consultation_status'],
     required: true,
   })
-  type: 'text' | 'product_recommendation' | 'pet_share' | 'clinic_request';
+  type: 'text' | 'product_recommendation' | 'pet_share' | 'clinic_request' | 'consultation_status';
 
   @Prop({ type: String, enum: ['user', 'doctor', 'ai'], required: true })
   sender: 'user' | 'doctor' | 'ai';
@@ -89,6 +104,9 @@ export class Message {
 
   @Prop({ type: ClinicRequestSchema, default: null })
   clinicRequest: ClinicRequest | null;
+
+  @Prop({ type: ConsultationStatusSchema, default: null })
+  consultationStatus: ConsultationStatus | null;
 }
 
 export const MessageSchema = SchemaFactory.createForClass(Message);

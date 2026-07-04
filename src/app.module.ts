@@ -23,6 +23,7 @@ import { RealtimeModule } from './modules/realtime/realtime.module';
 import { StorePortalModule } from './modules/store-portal/store-portal.module';
 import { VetPortalModule } from './modules/vet-portal/vet-portal.module';
 import { ClinicRequestsModule } from './modules/clinic-requests/clinic-requests.module';
+import { ConsultationsModule } from './modules/consultations/consultations.module';
 
 @Module({
   imports: [
@@ -60,6 +61,7 @@ import { ClinicRequestsModule } from './modules/clinic-requests/clinic-requests.
     StorePortalModule,
     VetPortalModule,
     ClinicRequestsModule,
+    ConsultationsModule,
   ],
 })
 export class AppModule {}

@@ -13,6 +13,7 @@ class ClinicProfileDto {
 class ConsultationSettingsDto {
   @IsString() inPersonFee: string;
   @IsString() videoConsultFee: string;
+  @IsOptional() @IsString() textConsultFee?: string;
   @IsBoolean() inPersonEnabled: boolean;
   @IsBoolean() videoEnabled: boolean;
   @IsBoolean() textEnabled: boolean;

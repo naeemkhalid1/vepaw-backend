@@ -5,6 +5,7 @@ export class UpdateAppointmentStatusDto {
   @ApiProperty({ enum: ['confirmed', 'inProgress', 'done', 'cancelled', 'noShow'] })
   @IsString()
   @IsNotEmpty()
+  @IsIn(['confirmed', 'inProgress', 'done', 'cancelled', 'noShow'])
   status: string;
 }
 

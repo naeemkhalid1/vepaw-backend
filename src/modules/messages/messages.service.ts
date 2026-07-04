@@ -37,6 +37,12 @@ export function toMessageResponse(m: Message & { _id: Types.ObjectId; createdAt:
           status: m.clinicRequest.status,
         }
       : null,
+    consultationStatus: m.consultationStatus
+      ? {
+          sessionId: (m.consultationStatus.sessionId as unknown as Types.ObjectId).toString(),
+          status: m.consultationStatus.status,
+        }
+      : null,
     createdAt: m.createdAt,
   };
 }

@@ -148,7 +148,7 @@ export class VetsService {
     };
   }
 
-  async getVet(vetId: string): Promise<ServiceResponse<VetResponse>> {
+  async getVet(vetId: string, userId?: string): Promise<ServiceResponse<VetResponse>> {
     if (!Types.ObjectId.isValid(vetId)) {
       throw new NotFoundException({ message: 'Vet not found', code: 'VET_NOT_FOUND' });
     }
@@ -158,7 +158,18 @@ export class VetsService {
       throw new NotFoundException({ message: 'Vet not found', code: 'VET_NOT_FOUND' });
     }
 
-    return { data: toVetResponse(vet), message: 'Vet fetched' };
+    const canStartConsultation = userId
+      ? await this.appointmentModel.exists({
+          vet: new Types.ObjectId(vetId),
+          owner: new Types.ObjectId(userId),
+          status: 'completed',
+        }).then(Boolean)
+      : false;
+
+    return {
+      data: { ...toVetResponse(vet), canStartConsultation },
+      message: 'Vet fetched',
+    };
   }
 
   async getAvailability(

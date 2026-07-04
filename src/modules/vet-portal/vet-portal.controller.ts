@@ -473,6 +473,36 @@ export class VetRequestsController {
   }
 }
 
+// ─── Paid text consultations ──────────────────────────
+
+@ApiTags('vet-consultations')
+@Controller('vet/consultations')
+@ApiBearerAuth()
+@Roles('vet')
+export class VetConsultationsController {
+  constructor(private readonly service: VetPortalService) {}
+
+  @Get()
+  @ApiOperation({ summary: 'List paid text consultation sessions for this vet' })
+  getConsultations(@CurrentUser() user: JwtPayload, @Query('status') status?: string) {
+    return this.service.getVetConsultations(user.sub, status);
+  }
+
+  @Post(':id/mark-paid')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Verify payment proof and activate the consultation session' })
+  markPaid(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.service.markConsultationPaid(user.sub, id);
+  }
+
+  @Post(':id/end')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'End an active consultation session' })
+  end(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.service.endConsultation(user.sub, id);
+  }
+}
+
 // ─── Invite ──────────────────────────────────────────
 
 @ApiTags('vet-invite')

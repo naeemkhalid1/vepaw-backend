@@ -106,6 +106,7 @@ export class ClinicRequestsService {
         qty: dto.qty,
         status: 'requested',
       },
+      consultationStatus: null,
       createdAt: (message as MessageDocument).createdAt,
     };
 

@@ -104,6 +104,10 @@ export interface VetResponse {
   city: string;
   area: string;
   fee: { min: number; max: number };
+  inPersonEnabled: boolean;
+  videoEnabled: boolean;
+  textEnabled: boolean;
+  textConsultFee: number | null;
   specialty: string | null;
   about: string | null;
   yearsExperience: number | null;
@@ -119,6 +123,7 @@ export interface VetResponse {
   subscriptionStatus: string;
   featured: boolean;
   createdAt: Date;
+  canStartConsultation?: boolean;
 }
 
 export interface ReviewResponse {
@@ -294,15 +299,21 @@ export interface ClinicRequestPayload {
   status: 'requested' | 'confirmed' | 'declined' | 'dispensed' | 'cancelled';
 }
 
+export interface ConsultationStatusPayload {
+  sessionId: string;
+  status: 'pending_payment' | 'payment_submitted' | 'active' | 'closed' | 'expired';
+}
+
 export interface MessageResponse {
   id: string;
   thread: string;
-  type: 'text' | 'product_recommendation' | 'pet_share' | 'clinic_request';
+  type: 'text' | 'product_recommendation' | 'pet_share' | 'clinic_request' | 'consultation_status';
   sender: 'user' | 'doctor' | 'ai';
   text: string | null;
   product: ProductRecommendationPayload | null;
   pet: PetSharePayload | null;
   clinicRequest: ClinicRequestPayload | null;
+  consultationStatus: ConsultationStatusPayload | null;
   createdAt: Date;
 }
 
@@ -323,6 +334,31 @@ export interface ClinicDispenseResponse {
   dispensedAt: Date | null;
   declinedAt: Date | null;
   cancelledAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface ConsultationSessionResponse {
+  id: string;
+  owner: string;
+  pet: string;
+  petName: string;
+  vet: string;
+  vetName: string;
+  amount: number;
+  status: 'pending_payment' | 'payment_submitted' | 'active' | 'closed' | 'expired';
+  paymentProofUrl: string | null;
+  paymentSubmittedAt: Date | null;
+  paidAt: Date | null;
+  startedAt: Date | null;
+  autoExpireAt: Date | null;
+  closedAt: Date | null;
+  closedBy: 'vet' | 'system' | null;
+  paymentAccount: {
+    payoutMethod: string | null;
+    accountTitle: string | null;
+    mobileAccount: string | null;
+  } | null;
   createdAt: Date;
   updatedAt: Date;
 }

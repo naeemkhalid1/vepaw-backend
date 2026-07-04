@@ -173,6 +173,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       product: null,
       pet: doc.pet ?? null,
       clinicRequest: null,
+      consultationStatus: null,
       createdAt: doc.createdAt ?? new Date(),
     };
 
