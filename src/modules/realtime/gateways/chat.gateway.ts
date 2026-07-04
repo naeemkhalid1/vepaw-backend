@@ -40,8 +40,19 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   // gateway-level map: threadId → patientId
   // populated whenever a vet joins via patientId; used to also broadcast to patientId room
-  // so vets receive messages even before they join the threadId room
+  // so vets receive messages even before they join the threadId room.
+  // Bounded + LRU-evicted — this map outlives any single socket connection, so without
+  // a cap it grows forever as new vet↔patient threads open over the process's lifetime.
   private readonly threadToPatientRoom = new Map<string, string>();
+  private static readonly MAX_THREAD_PATIENT_ENTRIES = 5000;
+
+  private cacheThreadPatientMapping(threadId: string, patientId: string): void {
+    if (this.threadToPatientRoom.size >= ChatGateway.MAX_THREAD_PATIENT_ENTRIES) {
+      const oldestKey = this.threadToPatientRoom.keys().next().value;
+      if (oldestKey !== undefined) this.threadToPatientRoom.delete(oldestKey);
+    }
+    this.threadToPatientRoom.set(threadId, patientId);
+  }
 
   constructor(
     private readonly jwtService: JwtService,
@@ -233,7 +244,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     client.data.vetPatientMap[incomingId] = threadId;
 
     // Store gateway-level mapping so broadcasts from owner messages reach this patientId room too
-    this.threadToPatientRoom.set(threadId, incomingId);
+    this.cacheThreadPatientMapping(threadId, incomingId);
 
     // Join both rooms: patientId for guaranteed pre-thread delivery; threadId for normal delivery
     await client.join(incomingId);

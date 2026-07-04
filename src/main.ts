@@ -36,18 +36,20 @@ async function bootstrap(): Promise<void> {
   app.useGlobalInterceptors(new ResponseInterceptor());
   app.useGlobalFilters(new HttpExceptionFilter());
 
-  const swaggerConfig = new DocumentBuilder()
-    .setTitle('VePaw API')
-    .setDescription('VePaw backend REST API')
-    .setVersion('1.0')
-    .addBearerAuth()
-    .build();
+  if (process.env.NODE_ENV !== 'production') {
+    const swaggerConfig = new DocumentBuilder()
+      .setTitle('VePaw API')
+      .setDescription('VePaw backend REST API')
+      .setVersion('1.0')
+      .addBearerAuth()
+      .build();
 
-  SwaggerModule.setup(
-    'api/docs',
-    app,
-    SwaggerModule.createDocument(app, swaggerConfig),
-  );
+    SwaggerModule.setup(
+      'api/docs',
+      app,
+      SwaggerModule.createDocument(app, swaggerConfig),
+    );
+  }
 
   await app.listen(process.env.PORT ?? 3000);
 }
