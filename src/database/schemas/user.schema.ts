@@ -23,6 +23,22 @@ const AddressEntrySchema = SchemaFactory.createForClass(AddressEntry);
 
 export type AddressSubdoc = AddressEntry & { _id: Types.ObjectId };
 
+@Schema({ _id: true })
+class PaymentMethodEntry {
+  @Prop({ required: true, trim: true })
+  provider: string;
+
+  @Prop({ required: true, trim: true })
+  phoneNumber: string;
+
+  @Prop({ default: false })
+  isDefault: boolean;
+}
+
+const PaymentMethodEntrySchema = SchemaFactory.createForClass(PaymentMethodEntry);
+
+export type PaymentMethodSubdoc = PaymentMethodEntry & { _id: Types.ObjectId };
+
 export type UserDocument = HydratedDocument<User> & {
   createdAt: Date;
   updatedAt: Date;
@@ -68,6 +84,9 @@ export class User {
 
   @Prop({ type: [AddressEntrySchema], default: [] })
   addresses: AddressSubdoc[];
+
+  @Prop({ type: [PaymentMethodEntrySchema], default: [] })
+  paymentMethods: PaymentMethodSubdoc[];
 
   @Prop({
     type: {

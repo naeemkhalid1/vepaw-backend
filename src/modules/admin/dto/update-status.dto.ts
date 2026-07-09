@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { IsIn, IsNotEmpty, IsOptional, IsString } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class UpdateVetApplicationStatusDto {
@@ -37,4 +37,11 @@ export class UpdateTransactionStatusDto {
   @IsString()
   @IsNotEmpty()
   status: string;
+}
+
+export class ResolveConsultationDto {
+  @ApiProperty({ enum: ['approve', 'reject'] })
+  @IsString()
+  @IsIn(['approve', 'reject'])
+  outcome: 'approve' | 'reject';
 }

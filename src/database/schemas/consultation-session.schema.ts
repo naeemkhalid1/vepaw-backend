@@ -1,6 +1,18 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
 
+export const CONSULTATION_STATUSES = [
+  'pending_payment',
+  'payment_submitted',
+  'active',
+  'disputed',
+  'closed',
+  'expired',
+  'cancelled',
+] as const;
+
+export type ConsultationStatus = (typeof CONSULTATION_STATUSES)[number];
+
 export type ConsultationSessionDocument = HydratedDocument<ConsultationSession> & {
   createdAt: Date;
   updatedAt: Date;
@@ -17,6 +29,9 @@ export class ConsultationSession {
   @Prop({ type: Types.ObjectId, ref: 'Vet', required: true, index: true })
   vet: Types.ObjectId;
 
+  @Prop({ type: Types.ObjectId, ref: 'Clinic', default: null, index: true })
+  clinicId: Types.ObjectId | null;
+
   @Prop({ type: Types.ObjectId, ref: 'Thread', required: true })
   thread: Types.ObjectId;
 
@@ -25,11 +40,11 @@ export class ConsultationSession {
 
   @Prop({
     type: String,
-    enum: ['pending_payment', 'payment_submitted', 'active', 'closed', 'expired'],
+    enum: CONSULTATION_STATUSES,
     default: 'pending_payment',
     index: true,
   })
-  status: 'pending_payment' | 'payment_submitted' | 'active' | 'closed' | 'expired';
+  status: ConsultationStatus;
 
   @Prop({ type: String, default: null })
   paymentProofUrl: string | null;
@@ -49,11 +64,30 @@ export class ConsultationSession {
   @Prop({ type: Date, default: null })
   closedAt: Date | null;
 
-  @Prop({ type: String, enum: ['vet', 'system'], default: null })
-  closedBy: 'vet' | 'system' | null;
+  @Prop({ type: String, enum: ['vet', 'system', 'admin'], default: null })
+  closedBy: 'vet' | 'system' | 'admin' | null;
+
+  @Prop({ type: Types.ObjectId, ref: 'Vet', default: null })
+  resolvedBy: Types.ObjectId | null;
+
+  @Prop({ type: String, enum: ['admin_vet', 'team_vet', 'accountant'], default: null })
+  resolvedByRole: 'admin_vet' | 'team_vet' | 'accountant' | null;
+
+  @Prop({ type: String, default: null })
+  disputeReason: string | null;
+
+  @Prop({ type: Types.ObjectId, ref: 'User', default: null })
+  adminResolvedBy: Types.ObjectId | null;
+
+  @Prop({ type: Date, default: null })
+  adminResolvedAt: Date | null;
+
+  @Prop({ default: false })
+  refundRequired: boolean;
 }
 
 export const ConsultationSessionSchema = SchemaFactory.createForClass(ConsultationSession);
 
 ConsultationSessionSchema.index({ vet: 1, status: 1 });
 ConsultationSessionSchema.index({ owner: 1, status: 1 });
+ConsultationSessionSchema.index({ clinicId: 1, status: 1 });

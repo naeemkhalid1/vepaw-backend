@@ -25,11 +25,11 @@ export class Appointment {
 
   @Prop({
     type: String,
-    enum: ['pending', 'confirmed', 'completed', 'cancelled', 'no-show'],
+    enum: ['pending', 'confirmed', 'in-progress', 'completed', 'cancelled', 'no-show'],
     default: 'pending',
     index: true,
   })
-  status: 'pending' | 'confirmed' | 'completed' | 'cancelled' | 'no-show';
+  status: 'pending' | 'confirmed' | 'in-progress' | 'completed' | 'cancelled' | 'no-show';
 
   @Prop({ required: true, min: 0 })
   fee: number;
@@ -49,13 +49,22 @@ export class Appointment {
 
   @Prop({
     type: String,
-    enum: ['pending', 'held', 'released', 'refunded'],
+    enum: ['pending', 'proof_submitted', 'held', 'released', 'refunded'],
     default: 'pending',
   })
-  paymentStatus: 'pending' | 'held' | 'released' | 'refunded';
+  paymentStatus: 'pending' | 'proof_submitted' | 'held' | 'released' | 'refunded';
 
   @Prop({ type: String, default: null })
   paymentReference: string | null;
+
+  // Bare S3 key of the uploaded proof screenshot (private object) — a fresh signed URL is
+  // resolved on every read rather than persisted, since the proof may be viewed long after
+  // upload. Not applicable to 'cod' appointments.
+  @Prop({ type: String, default: null })
+  paymentProofUrl: string | null;
+
+  @Prop({ type: Date, default: null })
+  paymentSubmittedAt: Date | null;
 
   @Prop({ type: String, default: null })
   notes: string | null;

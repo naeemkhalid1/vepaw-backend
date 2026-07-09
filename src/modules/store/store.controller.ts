@@ -21,6 +21,7 @@ import { ListOrdersDto } from './dto/list-orders.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { JwtPayload } from '../../shared/types';
+import { CreateSubscriptionDto } from '../subscriptions/dto/create-subscription.dto';
 import { UpdateSubscriptionDto } from '../subscriptions/dto/update-subscription.dto';
 
 @ApiTags('store')
@@ -65,6 +66,13 @@ export class StoreController {
   @ApiOperation({ summary: 'Update order status (store/admin)' })
   updateOrderStatus(@Param('id') id: string, @Body() dto: UpdateOrderStatusDto) {
     return this.storeService.updateOrderStatus(id, dto);
+  }
+
+  @Post('subscriptions')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Create a recurring subscription for a product' })
+  createSubscription(@CurrentUser() user: JwtPayload, @Body() dto: CreateSubscriptionDto) {
+    return this.storeService.createSubscription(user.sub, dto);
   }
 
   @Get('subscriptions')

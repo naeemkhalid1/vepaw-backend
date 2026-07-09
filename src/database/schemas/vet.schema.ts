@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { HydratedDocument } from 'mongoose';
+import { HydratedDocument, Types } from 'mongoose';
 
 export interface WorkingDay {
   open: string;
@@ -182,18 +182,6 @@ export class Vet {
   @Prop({ type: String, default: null })
   clinicPhoto: string | null;
 
-  @Prop({ type: String, default: null })
-  payoutMethod: string | null;
-
-  @Prop({ type: String, default: null })
-  accountTitle: string | null;
-
-  @Prop({ type: String, default: null })
-  mobileAccount: string | null;
-
-  @Prop({ type: String, default: null })
-  cnicOnAccount: string | null;
-
   @Prop({
     type: [{
       _id: false,
@@ -216,6 +204,16 @@ export class Vet {
     index: true,
   })
   applicationStatus: 'pending' | 'approved' | 'rejected';
+
+  @Prop({ type: Types.ObjectId, ref: 'Clinic', default: null, index: true })
+  clinicId: Types.ObjectId | null;
+
+  @Prop({
+    type: String,
+    enum: ['admin_vet', 'team_vet', 'accountant'],
+    default: null,
+  })
+  staffRole: 'admin_vet' | 'team_vet' | 'accountant' | null;
 }
 
 export const VetSchema = SchemaFactory.createForClass(Vet);

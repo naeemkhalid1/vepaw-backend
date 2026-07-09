@@ -190,7 +190,13 @@ export class AuthService {
         throw new UnauthorizedException({ message: 'Invalid credentials', code: 'INVALID_CREDENTIALS' });
       }
       const role = 'vet_admin';
-      const payload: JwtPayload = { sub: vet._id.toString(), phone: vet.phone, role: 'vet' };
+      const payload: JwtPayload = {
+        sub: vet._id.toString(),
+        phone: vet.phone,
+        role: 'vet',
+        clinicId: vet.clinicId ? vet.clinicId.toString() : undefined,
+        staffRole: vet.staffRole ?? undefined,
+      };
       const token = this.jwtService.sign(payload);
       return { data: { token, role, redirectTo: '/vet/schedule', name: vet.name }, message: 'Login successful' };
     }

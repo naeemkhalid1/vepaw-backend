@@ -1,7 +1,7 @@
 import { Types } from 'mongoose';
 import { Product } from '../../database/schemas/product.schema';
 import { Order, OrderItem } from '../../database/schemas/order.schema';
-import { ProductResponse, ProductVariantResponse, OrderResponse, OrderItemResponse } from '../types';
+import { ProductResponse, ProductVariantResponse, OrderResponse, OrderItemResponse, SubscriptionResponse } from '../types';
 
 type ProductLean = Omit<Product, '_id'> & { _id: Types.ObjectId; createdAt: Date };
 type OrderItemLean = Omit<OrderItem, '_id'>;
@@ -42,6 +42,23 @@ export function toProductResponse(product: ProductLean): ProductResponse {
     isVetRecommended: product.isVetRecommended,
     recommendedBy: product.recommendedBy,
     createdAt: product.createdAt,
+  };
+}
+
+export function toSubscriptionResponse(order: OrderLean): SubscriptionResponse {
+  const item = order.items[0];
+  return {
+    id: order._id.toString(),
+    user: (order.user as Types.ObjectId).toString(),
+    product: (item.product as Types.ObjectId).toString(),
+    productName: item.name,
+    productPhoto: item.photo || null,
+    storeName: order.storeName,
+    qty: item.qty,
+    interval: order.interval,
+    nextOrderDate: order.nextOrderDate,
+    subscriberPrice: item.price,
+    status: order.status,
   };
 }
 

@@ -11,7 +11,6 @@ import { UsersModule } from './modules/users/users.module';
 import { PetsModule } from './modules/pets/pets.module';
 import { VetsModule } from './modules/vets/vets.module';
 import { AppointmentsModule } from './modules/appointments/appointments.module';
-import { PaymentsModule } from './modules/payments/payments.module';
 import { StoreModule } from './modules/store/store.module';
 import { SubscriptionsModule } from './modules/subscriptions/subscriptions.module';
 import { SymptomCheckModule } from './modules/symptom-check/symptom-check.module';
@@ -49,7 +48,6 @@ import { ConsultationsModule } from './modules/consultations/consultations.modul
     PetsModule,
     VetsModule,
     AppointmentsModule,
-    PaymentsModule,
     StoreModule,
     SubscriptionsModule,
     SymptomCheckModule,

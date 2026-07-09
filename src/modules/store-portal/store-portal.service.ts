@@ -178,7 +178,7 @@ export class StorePortalService {
         frequency: 'Monthly',
         nextOrder: o.nextOrderDate,
         value: o.totalAmount,
-        status: o.status === 'cancelled' ? 'paused' : 'active',
+        status: o.status === 'cancelled' || o.status === 'paused' ? 'paused' : 'active',
       };
     });
 
@@ -187,8 +187,8 @@ export class StorePortalService {
 
   async getSubscriptionStats(storeId: string): Promise<ServiceResponse<Record<string, unknown>>> {
     const sid = new Types.ObjectId(storeId);
-    const active = await this.orderModel.countDocuments({ store: sid, isSubscription: true, status: { $ne: 'cancelled' } });
-    const paused = await this.orderModel.countDocuments({ store: sid, isSubscription: true, status: 'cancelled' });
+    const active = await this.orderModel.countDocuments({ store: sid, isSubscription: true, status: { $nin: ['cancelled', 'paused'] } });
+    const paused = await this.orderModel.countDocuments({ store: sid, isSubscription: true, status: { $in: ['cancelled', 'paused'] } });
 
     return {
       data: {

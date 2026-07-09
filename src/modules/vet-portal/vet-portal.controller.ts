@@ -16,12 +16,14 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { VetPortalService } from './vet-portal.service';
 import { Roles } from '../../common/decorators/roles.decorator';
+import { ClinicRoles } from '../../common/decorators/clinic-roles.decorator';
 import { Public } from '../../common/decorators/public.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { JwtPayload } from '../../shared/types';
 import { AddVisitNoteDto } from './dto/add-visit-note.dto';
 import { ReplyReviewDto } from './dto/reply-review.dto';
 import { InviteTeamMemberDto } from './dto/invite-team-member.dto';
+import { DisputeConsultationDto } from './dto/dispute-consultation.dto';
 import { CreateListingDto } from './dto/create-listing.dto';
 import { UpdateListingDto } from './dto/update-listing.dto';
 import { UpdateClinicSettingsDto } from './dto/update-clinic-settings.dto';
@@ -29,6 +31,7 @@ import { BlockSlotsDto } from './dto/block-slots.dto';
 import { BlockDayDto } from './dto/block-day.dto';
 import { SubmitOnboardingDto } from './dto/submit-onboarding.dto';
 import { AcceptVetInviteDto } from './dto/accept-vet-invite.dto';
+import { GetScheduleAppointmentsDto } from './dto/get-schedule-appointments.dto';
 import {
   UpdateAppointmentStatusDto,
   AddVaccinationDto,
@@ -54,9 +57,9 @@ export class VetScheduleController {
   }
 
   @Get('appointments')
-  @ApiOperation({ summary: "Today's appointments" })
-  getAppointments(@CurrentUser() user: JwtPayload) {
-    return this.service.getScheduleAppointments(user.sub);
+  @ApiOperation({ summary: 'Appointments within a date range — defaults to today if no range is given' })
+  getAppointments(@CurrentUser() user: JwtPayload, @Query() dto: GetScheduleAppointmentsDto) {
+    return this.service.getScheduleAppointments(user.sub, dto);
   }
 
   @Get('next-patient')
@@ -243,6 +246,7 @@ export class VetTeamController {
 
   @Post('invite')
   @HttpCode(HttpStatus.OK)
+  @ClinicRoles('admin_vet')
   @ApiOperation({ summary: 'Invite team member' })
   invite(@CurrentUser() user: JwtPayload, @Body() dto: InviteTeamMemberDto) {
     return this.service.inviteTeamMember(user.sub, dto);
@@ -317,11 +321,12 @@ export class VetClinicSettingsController {
   @Put()
   @ApiOperation({ summary: 'Update clinic settings' })
   updateSettings(@CurrentUser() user: JwtPayload, @Body() dto: UpdateClinicSettingsDto) {
-    return this.service.updateClinicSettings(user.sub, dto);
+    return this.service.updateClinicSettings(user, dto);
   }
 
   @Post('payout')
   @HttpCode(HttpStatus.OK)
+  @ClinicRoles('admin_vet', 'accountant')
   @ApiOperation({ summary: 'Submit new payout account' })
   updatePayoutAccount(@CurrentUser() user: JwtPayload, @Body() dto: UpdatePayoutAccountDto) {
     return this.service.updateVetPayoutAccount(user.sub, dto.accountNumber);
@@ -492,14 +497,21 @@ export class VetConsultationsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Verify payment proof and activate the consultation session' })
   markPaid(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.service.markConsultationPaid(user.sub, id);
+    return this.service.markConsultationPaid(user, id);
+  }
+
+  @Post(':id/dispute')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Dispute a submitted payment proof — escalates to platform admin' })
+  dispute(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: DisputeConsultationDto) {
+    return this.service.disputeConsultation(user, id, dto.reason);
   }
 
   @Post(':id/end')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'End an active consultation session' })
   end(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.service.endConsultation(user.sub, id);
+    return this.service.endConsultation(user, id);
   }
 }
 

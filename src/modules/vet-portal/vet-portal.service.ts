@@ -10,6 +10,7 @@ import { Model, Types } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import { randomBytes } from 'crypto';
 import { Vet, VetDocument } from '../../database/schemas/vet.schema';
+import { Clinic, ClinicDocument } from '../../database/schemas/clinic.schema';
 import { Appointment, AppointmentDocument } from '../../database/schemas/appointment.schema';
 import { Pet, PetDocument } from '../../database/schemas/pet.schema';
 import { User, UserDocument } from '../../database/schemas/user.schema';
@@ -32,12 +33,14 @@ import {
 import { toClinicDispenseResponse } from '../../shared/mappers/clinic-request.mapper';
 import { toConsultationSessionResponse } from '../../shared/mappers/consultation.mapper';
 import { ChatGateway } from '../realtime/gateways/chat.gateway';
+import { S3Service } from '../../common/storage/s3.service';
 import {
   ServiceResponse,
   MessageResponse,
   PetSharePayload,
   ClinicDispenseResponse,
   ConsultationSessionResponse,
+  JwtPayload,
 } from '../../shared/types';
 import { AddVisitNoteDto } from './dto/add-visit-note.dto';
 import { ReplyReviewDto } from './dto/reply-review.dto';
@@ -49,6 +52,7 @@ import { BlockSlotsDto } from './dto/block-slots.dto';
 import { BlockDayDto } from './dto/block-day.dto';
 import { SubmitOnboardingDto } from './dto/submit-onboarding.dto';
 import { AcceptVetInviteDto } from './dto/accept-vet-invite.dto';
+import { karachiDateStr, karachiTimeStr, karachiStartOfMonth, karachiDateTimeToUTC } from '../../shared/utils/karachi-time.util';
 
 const AVATAR_COLORS = ['#6366F1', '#F59E0B', '#10B981', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6', '#F97316'];
 const CATEGORY_COLORS: Record<string, { icon: string; bg: string }> = {
@@ -114,17 +118,19 @@ export class VetPortalService {
     @InjectModel(Message.name) private readonly messageModel: Model<MessageDocument>,
     @InjectModel(Product.name) private readonly productModel: Model<ProductDocument>,
     @InjectModel(ClinicDispense.name) private readonly clinicDispenseModel: Model<ClinicDispenseDocument>,
+    @InjectModel(Clinic.name) private readonly clinicModel: Model<ClinicDocument>,
     @InjectModel(ConsultationSession.name)
     private readonly consultationModel: Model<ConsultationSessionDocument>,
     private readonly chatGateway: ChatGateway,
+    private readonly s3Service: S3Service,
   ) {}
 
   // ─── Schedule ──────────────────────────────────────────
 
   async getScheduleStats(vetId: string): Promise<ServiceResponse<Record<string, unknown>>> {
     const vid = new Types.ObjectId(vetId);
-    const today = new Date().toISOString().slice(0, 10);
-    const startOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+    const today = karachiDateStr();
+    const startOfMonth = karachiStartOfMonth();
 
     const [todayAppts, monthAppts, vet] = await Promise.all([
       this.appointmentModel.find({ vet: vid, date: today }).lean().exec(),
@@ -132,7 +138,7 @@ export class VetPortalService {
       this.vetModel.findById(vetId).lean().exec(),
     ]);
 
-    const confirmed = todayAppts.filter((a) => a.status === 'confirmed').length;
+    const confirmed = todayAppts.filter((a) => a.status === 'confirmed' || a.status === 'in-progress').length;
     const pending = todayAppts.filter((a) => a.status === 'pending').length;
     const pendingEarnings = todayAppts.filter((a) => a.status !== 'cancelled').reduce((s, a) => s + a.vetPayout, 0);
     const monthTotal = monthAppts.length;
@@ -156,31 +162,56 @@ export class VetPortalService {
     };
   }
 
-  async getScheduleAppointments(vetId: string): Promise<ServiceResponse<Record<string, unknown>[]>> {
-    const today = new Date().toISOString().slice(0, 10);
+  async getScheduleAppointments(
+    vetId: string,
+    range: { startDate?: string; endDate?: string },
+  ): Promise<ServiceResponse<Record<string, unknown>[]>> {
+    const today = karachiDateStr();
+    const startDate = range.startDate ?? today;
+    const endDate = range.endDate ?? startDate;
+
+    if (endDate < startDate) {
+      throw new BadRequestException({ message: 'endDate must not be before startDate', code: 'INVALID_DATE_RANGE' });
+    }
+
     const appts = await this.appointmentModel
-      .find({ vet: new Types.ObjectId(vetId), date: today })
-      .sort({ timeSlot: 1 })
+      .find({ vet: new Types.ObjectId(vetId), date: { $gte: startDate, $lte: endDate } })
+      .sort({ date: 1, timeSlot: 1 })
       .lean()
       .exec();
 
-    const mapped = appts.map((a) => ({
+    const mapped = await Promise.all(appts.map(async (a) => ({
       id: a._id.toString(),
+      patientId: a.pet.toString(),
+      date: a.date,
       time: a.timeSlot,
       duration: '30 min',
       petName: a.petDetails.name,
       ownerName: a.vetDetails.name,
       ownerPhone: a.vetDetails.phone,
       visitType: 'checkup',
-      status: a.status === 'completed' ? 'done' : a.status,
-    }));
+      status: this.toScheduleStatus(a.status),
+      paymentMethod: a.paymentMethod,
+      paymentStatus: a.paymentStatus,
+      paymentProofUrl: a.paymentProofUrl ? await this.s3Service.getSignedReadUrl(a.paymentProofUrl) : null,
+      paymentSubmittedAt: a.paymentSubmittedAt,
+    })));
 
     return { data: mapped, message: 'Appointments retrieved' };
   }
 
+  // Maps the DB status enum ('pending'|'confirmed'|'in-progress'|'completed'|'cancelled'|'no-show') to the
+  // camelCase vocabulary POST /vet/schedule/appointments/:id/status accepts, so GET and POST agree.
+  private toScheduleStatus(status: 'pending' | 'confirmed' | 'in-progress' | 'completed' | 'cancelled' | 'no-show'): string {
+    if (status === 'in-progress') return 'inProgress';
+    if (status === 'completed') return 'done';
+    if (status === 'no-show') return 'noShow';
+    return status;
+  }
+
   async getNextPatient(vetId: string): Promise<ServiceResponse<Record<string, unknown> | null>> {
-    const today = new Date().toISOString().slice(0, 10);
-    const now = new Date().toTimeString().slice(0, 5);
+    const today = karachiDateStr();
+    const now = karachiTimeStr();
 
     const next = await this.appointmentModel
       .findOne({ vet: new Types.ObjectId(vetId), date: today, timeSlot: { $gte: now }, status: { $in: ['confirmed', 'pending'] } })
@@ -225,7 +256,7 @@ export class VetPortalService {
 
   async getPatients(vetId: string): Promise<ServiceResponse<Record<string, unknown>[]>> {
     const appts = await this.appointmentModel
-      .find({ vet: new Types.ObjectId(vetId) })
+      .find({ vet: new Types.ObjectId(vetId), status: { $in: ['confirmed', 'in-progress', 'completed'] } })
       .sort({ createdAt: -1 })
       .lean()
       .exec();
@@ -258,7 +289,10 @@ export class VetPortalService {
   }
 
   async getPatientStats(vetId: string): Promise<ServiceResponse<Record<string, unknown>>> {
-    const appts = await this.appointmentModel.find({ vet: new Types.ObjectId(vetId) }).lean().exec();
+    const appts = await this.appointmentModel
+      .find({ vet: new Types.ObjectId(vetId), status: { $in: ['confirmed', 'in-progress', 'completed'] } })
+      .lean()
+      .exec();
     const petIds = [...new Set(appts.map((a) => a.pet.toString()))];
     const pets = await this.petModel.find({ _id: { $in: petIds.map((id) => new Types.ObjectId(id)) } }).lean().exec();
 
@@ -298,10 +332,11 @@ export class VetPortalService {
       .lean()
       .exec();
 
-    const hasPendingVax = (pet.vaccinations ?? []).some((v) => new Date(v.nextDue) <= new Date());
-    const hasOverdue = (pet.vaccinations ?? []).some((v) => new Date(v.nextDue) < new Date());
+    const todayStr = karachiDateStr();
+    const hasPendingVax = (pet.vaccinations ?? []).some((v) => v.nextDue <= todayStr);
+    const hasOverdue = (pet.vaccinations ?? []).some((v) => v.nextDue < todayStr);
     const nextApptOverdue = nextAppt
-      ? new Date(`${nextAppt.date}T${nextAppt.timeSlot}:00`) < new Date()
+      ? karachiDateTimeToUTC(nextAppt.date, nextAppt.timeSlot) < new Date()
       : false;
 
     return {
@@ -327,7 +362,7 @@ export class VetPortalService {
           title: n.title,
           notes: n.notes,
           recordedBy: n.recordedBy,
-          date: n.createdAt.toISOString().slice(0, 10),
+          date: karachiDateStr(n.createdAt),
         })),
       },
       message: 'Patient chart retrieved',
@@ -520,15 +555,16 @@ export class VetPortalService {
     const vet = await this.vetModel.findById(vetId).lean().exec();
     if (!vet) throw new NotFoundException('Vet not found');
 
-    const account = vet.mobileAccount ?? '';
+    const clinic = vet.clinicId ? await this.clinicModel.findById(vet.clinicId).lean().exec() : null;
+    const account = clinic?.mobileAccount ?? '';
     const masked = account.length > 4 ? '•••• ' + account.slice(-4) : account;
 
     return {
       data: {
-        label: vet.payoutMethod ?? 'JazzCash',
-        initials: getInitials(vet.payoutMethod ?? 'JC'),
+        label: clinic?.payoutMethod ?? 'JazzCash',
+        initials: getInitials(clinic?.payoutMethod ?? 'JC'),
         maskedNumber: masked,
-        accountName: vet.accountTitle ?? vet.name,
+        accountName: clinic?.accountTitle ?? vet.name,
         commissionNote: `Platform commission applied`,
       },
       message: 'Payout account retrieved',
@@ -537,36 +573,66 @@ export class VetPortalService {
 
   // ─── Team ──────────────────────────────────────────────
 
-  async getTeam(vetId: string): Promise<ServiceResponse<Record<string, unknown>[]>> {
+  private staffRoleLabel(staffRole: 'admin_vet' | 'team_vet' | 'accountant' | null): string {
+    if (staffRole === 'team_vet') return 'Veterinarian';
+    if (staffRole === 'accountant') return 'Accountant';
+    return 'Admin / Veterinarian'; // 'admin_vet' or legacy solo vet (null)
+  }
+
+  // Resolves the clinic-mates of a calling vet. Falls back to solo-vet behavior
+  // (just themselves) when they have no clinicId yet, so legacy vets are unaffected.
+  private async resolveClinicVetIds(
+    vetId: string,
+  ): Promise<{ clinicId: Types.ObjectId | null; vetIds: Types.ObjectId[]; adminVetId: Types.ObjectId }> {
     const vet = await this.vetModel.findById(vetId).lean().exec();
     if (!vet) throw new NotFoundException('Vet not found');
 
-    const members: Record<string, unknown>[] = [
-      {
-        id: vet._id.toString(),
-        name: vet.name,
-        subtitle: vet.specialty ?? 'Veterinarian',
-        role: 'adminVet',
-        roleLabel: 'Admin / Veterinarian',
-        patients: null,
-        rating: vet.rating,
-        status: 'active',
-        isYou: true,
-      },
-    ];
+    if (!vet.clinicId) {
+      const selfId = vet._id as Types.ObjectId;
+      return { clinicId: null, vetIds: [selfId], adminVetId: selfId };
+    }
+
+    const [clinic, clinicMates] = await Promise.all([
+      this.clinicModel.findById(vet.clinicId).lean().exec(),
+      this.vetModel.find({ clinicId: vet.clinicId }).lean().exec(),
+    ]);
+
+    return {
+      clinicId: vet.clinicId as Types.ObjectId,
+      vetIds: clinicMates.map((v) => v._id as Types.ObjectId),
+      adminVetId: (clinic?.ownerId as Types.ObjectId) ?? (vet._id as Types.ObjectId),
+    };
+  }
+
+  async getTeam(vetId: string): Promise<ServiceResponse<Record<string, unknown>[]>> {
+    const { vetIds, adminVetId } = await this.resolveClinicVetIds(vetId);
+    const clinicVets = await this.vetModel.find({ _id: { $in: vetIds } }).lean().exec();
+
+    const members: Record<string, unknown>[] = clinicVets.map((v) => ({
+      id: v._id.toString(),
+      name: v.name,
+      subtitle: v.specialty ?? 'Veterinarian',
+      role: v.staffRole ?? 'admin_vet',
+      roleLabel: this.staffRoleLabel(v.staffRole),
+      patients: null,
+      rating: v.rating,
+      status: 'active',
+      isYou: v._id.toString() === vetId,
+    }));
 
     const invites = await this.inviteModel
-      .find({ entityId: new Types.ObjectId(vetId), entityType: 'vet', status: 'pending' })
+      .find({ entityId: adminVetId, entityType: 'vet', status: 'pending' })
       .lean()
       .exec();
 
     for (const inv of invites) {
+      const inviteRole = inv.role === 'accountant' ? 'accountant' : 'team_vet';
       members.push({
         id: inv._id.toString(),
         name: inv.inviteeName,
         subtitle: inv.role,
-        role: inv.role === 'veterinarian' ? 'veterinarian' : 'clinicAdmin',
-        roleLabel: inv.role === 'veterinarian' ? 'Veterinarian' : 'Clinic Admin',
+        role: inviteRole,
+        roleLabel: this.staffRoleLabel(inviteRole),
         patients: null,
         rating: null,
         status: 'invited',
@@ -578,23 +644,27 @@ export class VetPortalService {
   }
 
   async getTeamStats(vetId: string): Promise<ServiceResponse<Record<string, unknown>>> {
-    const vet = await this.vetModel.findById(vetId).lean().exec();
-    const invites = await this.inviteModel.countDocuments({
-      entityId: new Types.ObjectId(vetId),
-      entityType: 'vet',
-      status: 'pending',
-    });
+    const { vetIds, adminVetId } = await this.resolveClinicVetIds(vetId);
+
+    const [clinicVets, adminVet, invites] = await Promise.all([
+      this.vetModel.find({ _id: { $in: vetIds } }).lean().exec(),
+      this.vetModel.findById(adminVetId).lean().exec(),
+      this.inviteModel.countDocuments({ entityId: adminVetId, entityType: 'vet', status: 'pending' }),
+    ]);
+
+    const veterinarians = clinicVets.filter((v) => v.staffRole !== 'accountant').length;
+    const accountants = clinicVets.filter((v) => v.staffRole === 'accountant').length;
 
     return {
       data: {
-        veterinarians: 1,
+        veterinarians,
         vetSubtitle: 'practicing',
-        admins: 0,
+        admins: accountants,
         adminSubtitle: 'clinic staff',
         pendingInvites: invites,
         pendingSubtitle: 'awaiting response',
-        clinicRating: vet?.rating ?? 0,
-        ratingSubtitle: `${vet?.reviewCount ?? 0} reviews`,
+        clinicRating: adminVet?.rating ?? 0,
+        ratingSubtitle: `${adminVet?.reviewCount ?? 0} reviews`,
       },
       message: 'Team stats retrieved',
     };
@@ -603,6 +673,10 @@ export class VetPortalService {
   async inviteTeamMember(vetId: string, dto: InviteTeamMemberDto): Promise<ServiceResponse<null>> {
     const vet = await this.vetModel.findById(vetId).lean().exec();
     if (!vet) throw new NotFoundException('Vet not found');
+    // Defense-in-depth: primary enforcement is @ClinicRoles('admin_vet') on the route.
+    if (vet.staffRole && vet.staffRole !== 'admin_vet') {
+      throw new ForbiddenException({ message: 'Only the clinic admin can invite team members', code: 'FORBIDDEN' });
+    }
 
     const token = randomBytes(32).toString('hex');
     const expiresAt = new Date();
@@ -699,11 +773,20 @@ export class VetPortalService {
 
   // ─── Clinic Settings ──────────────────────────────────
 
+  private async requireClinicId(vetId: string): Promise<Types.ObjectId> {
+    const vet = await this.vetModel.findById(vetId).select('clinicId').lean().exec();
+    if (!vet?.clinicId) {
+      throw new BadRequestException({ message: 'No clinic is set up for this account', code: 'CLINIC_NOT_FOUND' });
+    }
+    return vet.clinicId as Types.ObjectId;
+  }
+
   async getClinicSettings(vetId: string): Promise<ServiceResponse<Record<string, unknown>>> {
     const vet = await this.vetModel.findById(vetId).lean().exec();
     if (!vet) throw new NotFoundException('Vet not found');
 
-    const account = vet.mobileAccount ?? '';
+    const clinic = vet.clinicId ? await this.clinicModel.findById(vet.clinicId).lean().exec() : null;
+    const account = clinic?.mobileAccount ?? '';
     const masked = account.length > 4 ? '•••• ' + account.slice(-4) : account;
 
     const workingDays: string[] = [];
@@ -739,9 +822,9 @@ export class VetPortalService {
           bookableSlotsPerDay: 16,
         },
         payout: {
-          method: vet.payoutMethod ?? 'JazzCash',
-          methodInitials: getInitials(vet.payoutMethod ?? 'JC'),
-          accountHolder: vet.accountTitle ?? vet.name,
+          method: clinic?.payoutMethod ?? 'JazzCash',
+          methodInitials: getInitials(clinic?.payoutMethod ?? 'JC'),
+          accountHolder: clinic?.accountTitle ?? vet.name,
           maskedNumber: masked,
           commissionRate: '15%',
           commissionLabel: 'Platform commission on bookings',
@@ -757,9 +840,17 @@ export class VetPortalService {
     };
   }
 
-  async updateClinicSettings(vetId: string, dto: UpdateClinicSettingsDto): Promise<ServiceResponse<null>> {
+  async updateClinicSettings(user: JwtPayload, dto: UpdateClinicSettingsDto): Promise<ServiceResponse<null>> {
+    const vetId = user.sub;
     const vet = await this.vetModel.findById(vetId).exec();
     if (!vet) throw new NotFoundException('Vet not found');
+
+    if (dto.payout && user.staffRole && !['admin_vet', 'accountant'].includes(user.staffRole)) {
+      throw new ForbiddenException({
+        message: 'Only the clinic admin or accountant can update payout details',
+        code: 'FORBIDDEN',
+      });
+    }
 
     if (dto.profile) {
       vet.clinicName = dto.profile.clinicName;
@@ -806,8 +897,11 @@ export class VetPortalService {
     }
 
     if (dto.payout) {
-      vet.payoutMethod = dto.payout.method;
-      vet.accountTitle = dto.payout.accountHolder;
+      const clinicId = await this.requireClinicId(vetId);
+      await this.clinicModel.findByIdAndUpdate(clinicId, {
+        payoutMethod: dto.payout.method,
+        accountTitle: dto.payout.accountHolder,
+      }).exec();
     }
 
     if (dto.notifications) {
@@ -823,39 +917,42 @@ export class VetPortalService {
   // ─── Availability ─────────────────────────────────────
 
   async getAvailability(vetId: string, dateParam?: string): Promise<ServiceResponse<Record<string, unknown>>> {
-    const now = new Date();
-    const refDate = dateParam ? new Date(dateParam) : now;
-    const monthName = refDate.toLocaleString('en', { month: 'long', year: 'numeric' });
+    const todayStr = karachiDateStr();
+    const refDateStr = dateParam ?? todayStr;
+    // Build every date as a synthetic UTC-midnight instant from explicit y/m/d components, and
+    // only ever read it back with the UTC getters — this makes the whole week computation
+    // independent of the host process's local timezone (see karachi-time.util.ts).
+    const [refYear, refMonth, refDay] = refDateStr.split('-').map(Number);
+    const refUTC = Date.UTC(refYear, refMonth - 1, refDay);
+    const monthName = new Date(refUTC).toLocaleString('en', { month: 'long', year: 'numeric', timeZone: 'UTC' });
     const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-    const startOfWeek = new Date(refDate);
-    const dayOfWeek = startOfWeek.getDay();
-    startOfWeek.setDate(startOfWeek.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
-
-    const endOfWeek = new Date(startOfWeek);
-    endOfWeek.setDate(startOfWeek.getDate() + 6);
+    const refDayOfWeek = new Date(refUTC).getUTCDay();
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const startOfWeekUTC = refUTC - (refDayOfWeek === 0 ? 6 : refDayOfWeek - 1) * DAY_MS;
+    const endOfWeekUTC = startOfWeekUTC + 6 * DAY_MS;
 
     const weekDays = Array.from({ length: 7 }, (_, i) => {
-      const d = new Date(startOfWeek);
-      d.setDate(startOfWeek.getDate() + i);
+      const d = new Date(startOfWeekUTC + i * DAY_MS);
+      const fullDate = d.toISOString().slice(0, 10);
       return {
-        day: dayNames[d.getDay()],
-        date: d.getDate(),
-        fullDate: d.toISOString().slice(0, 10),
-        isActive: d.toISOString().slice(0, 10) === now.toISOString().slice(0, 10),
-        isOff: d.getDay() === 0,
+        day: dayNames[d.getUTCDay()],
+        date: d.getUTCDate(),
+        fullDate,
+        isActive: fullDate === todayStr,
+        isOff: d.getUTCDay() === 0,
       };
     });
 
-    const activeDay = dateParam ?? weekDays.find((d) => d.isActive)?.fullDate ?? now.toISOString().slice(0, 10);
+    const activeDay = dateParam ?? weekDays.find((d) => d.isActive)?.fullDate ?? todayStr;
     const todayAppts = await this.appointmentModel
       .find({ vet: new Types.ObjectId(vetId), date: activeDay })
       .lean()
       .exec();
     const bookedSlots = new Set(todayAppts.map((a) => a.timeSlot));
 
-    const weekStart = startOfWeek.toISOString().slice(0, 10);
-    const weekEnd = endOfWeek.toISOString().slice(0, 10);
+    const weekStart = new Date(startOfWeekUTC).toISOString().slice(0, 10);
+    const weekEnd = new Date(endOfWeekUTC).toISOString().slice(0, 10);
     const timeOffs = await this.timeOffModel
       .find({ vet: new Types.ObjectId(vetId), date: { $gte: weekStart, $lte: weekEnd } })
       .sort({ date: 1 })
@@ -1162,6 +1259,14 @@ export class VetPortalService {
     const invite = await this.inviteModel.findOne({ token, entityType: 'vet', status: 'pending' }).exec();
     if (!invite) throw new NotFoundException('Invite not found or expired');
 
+    const inviter = await this.vetModel.findById(invite.entityId).lean().exec();
+    if (!inviter || !inviter.clinicId) {
+      throw new BadRequestException({
+        message: 'Inviting clinic is not set up correctly',
+        code: 'CLINIC_NOT_FOUND',
+      });
+    }
+
     const hashedPassword = await bcrypt.hash(dto.password, 10);
 
     await this.vetModel.create({
@@ -1170,7 +1275,7 @@ export class VetPortalService {
       email: dto.email,
       password: hashedPassword,
       phone: dto.phone,
-      address: '',
+      address: inviter.address,
       area: invite.entityArea ?? '',
       fee: { min: parseInt(dto.consultationFee, 10) || 500, max: parseInt(dto.consultationFee, 10) || 1000 },
       specializations: dto.specialisations,
@@ -1180,8 +1285,11 @@ export class VetPortalService {
       primaryQualification: dto.primaryQualification,
       pvmcLicense: dto.pvmcLicense?.name ?? null,
       cnicDocument: dto.cnic?.name ?? null,
-      verified: false,
-      applicationStatus: 'pending',
+      verified: inviter.verified,
+      applicationStatus: 'approved',
+      subscriptionStatus: inviter.subscriptionStatus,
+      clinicId: inviter.clinicId,
+      staffRole: invite.role as 'team_vet' | 'accountant',
     });
 
     invite.status = 'accepted';
@@ -1193,9 +1301,9 @@ export class VetPortalService {
   // ─── Missing Endpoints ────────────────────────────────
 
   async updateAppointmentStatus(vetId: string, appointmentId: string, status: string): Promise<ServiceResponse<null>> {
-    const statusMap: Record<string, 'pending' | 'confirmed' | 'completed' | 'cancelled' | 'no-show'> = {
+    const statusMap: Record<string, 'pending' | 'confirmed' | 'in-progress' | 'completed' | 'cancelled' | 'no-show'> = {
       confirmed: 'confirmed',
-      inProgress: 'confirmed',
+      inProgress: 'in-progress',
       done: 'completed',
       cancelled: 'cancelled',
       noShow: 'no-show',
@@ -1547,22 +1655,50 @@ export class VetPortalService {
     vetId: string,
     status?: string,
   ): Promise<ServiceResponse<ConsultationSessionResponse[]>> {
-    const filter: Record<string, unknown> = { vet: new Types.ObjectId(vetId) };
+    const caller = await this.vetModel.findById(vetId).lean().exec();
+    if (!caller) throw new NotFoundException('Vet not found');
+
+    // Clinic-wide visibility: any staff on the same clinic can see a session,
+    // not just the exact vet it was created against. The direct vet-match is
+    // kept as a safety net for sessions that predate clinicId denormalization.
+    const filter: Record<string, unknown> = caller.clinicId
+      ? { $or: [{ vet: new Types.ObjectId(vetId) }, { clinicId: caller.clinicId }] }
+      : { vet: new Types.ObjectId(vetId) };
     if (status) filter.status = status;
 
     const sessions = await this.consultationModel.find(filter).sort({ createdAt: -1 }).lean().exec();
     if (sessions.length === 0) return { data: [], message: 'Consultations retrieved' };
 
     const petIds = [...new Set(sessions.map((s) => (s.pet as Types.ObjectId).toString()))];
-    const [pets, vet] = await Promise.all([
+    const sessionVetIds = [...new Set(sessions.map((s) => (s.vet as Types.ObjectId).toString()))];
+    const ownerIds = [...new Set(sessions.map((s) => (s.owner as Types.ObjectId).toString()))];
+    const [pets, vets, owners] = await Promise.all([
       this.petModel.find({ _id: { $in: petIds } }).select('name').lean().exec(),
-      this.vetModel.findById(vetId).lean().exec(),
+      this.vetModel.find({ _id: { $in: sessionVetIds } }).lean().exec(),
+      this.userModel.find({ _id: { $in: ownerIds } }).select('name').lean().exec(),
     ]);
     const petNames = new Map(pets.map((p) => [(p._id as Types.ObjectId).toString(), p.name]));
+    const vetMap = new Map(vets.map((v) => [(v._id as Types.ObjectId).toString(), v]));
+    const ownerNames = new Map(owners.map((o) => [(o._id as Types.ObjectId).toString(), o.name]));
 
-    const data = sessions.map((s) =>
-      toConsultationSessionResponse(s, petNames.get((s.pet as Types.ObjectId).toString()) ?? 'Pet', vet?.name ?? 'Vet', vet),
-    );
+    const clinicIds = [...new Set(vets.filter((v) => v.clinicId).map((v) => (v.clinicId as Types.ObjectId).toString()))];
+    const clinics = clinicIds.length
+      ? await this.clinicModel.find({ _id: { $in: clinicIds } }).lean().exec()
+      : [];
+    const clinicMap = new Map(clinics.map((c) => [(c._id as Types.ObjectId).toString(), c]));
+
+    const data = await Promise.all(sessions.map(async (s) => {
+      const sessionVet = vetMap.get((s.vet as Types.ObjectId).toString());
+      const clinic = sessionVet?.clinicId ? clinicMap.get((sessionVet.clinicId as Types.ObjectId).toString()) : null;
+      const paymentProofUrl = s.paymentProofUrl ? await this.s3Service.getSignedReadUrl(s.paymentProofUrl) : null;
+      return toConsultationSessionResponse(
+        { ...s, paymentProofUrl },
+        petNames.get((s.pet as Types.ObjectId).toString()) ?? 'Pet',
+        sessionVet?.name ?? 'Vet',
+        ownerNames.get((s.owner as Types.ObjectId).toString()) ?? 'Owner',
+        clinic,
+      );
+    }));
 
     return { data, message: 'Consultations retrieved' };
   }
@@ -1610,50 +1746,122 @@ export class VetPortalService {
     this.chatGateway.server.to(threadId.toString()).emit('message:received', response);
   }
 
-  async markConsultationPaid(vetId: string, sessionId: string): Promise<ServiceResponse<null>> {
-    const session = await this.consultationModel.findById(sessionId).exec();
-    if (!session) throw new NotFoundException({ message: 'Session not found', code: 'SESSION_NOT_FOUND' });
-    if (session.vet.toString() !== vetId) {
+  // Verifies session ownership/status and throws the precise error for a failed
+  // atomic transition attempt. Read-only — the mutation itself already happened
+  // (or didn't) in the atomic findOneAndUpdate; this only explains why.
+  // Any staff member on the same clinic may act on a session, not just the
+  // exact vet it was created against — mirrors getVetConsultations' visibility.
+  private consultationOwnershipFilter(user: JwtPayload, sessionId: string): Record<string, unknown> {
+    const vetMatch = { vet: new Types.ObjectId(user.sub) };
+    if (!user.clinicId) return { _id: new Types.ObjectId(sessionId), ...vetMatch };
+    return {
+      _id: new Types.ObjectId(sessionId),
+      $or: [vetMatch, { clinicId: new Types.ObjectId(user.clinicId) }],
+    };
+  }
+
+  private async explainFailedConsultationTransition(
+    user: JwtPayload,
+    sessionId: string,
+    requiredStatus: string,
+    invalidStatusMessage: string,
+  ): Promise<never> {
+    const exists = await this.consultationModel.findById(sessionId).lean().exec();
+    if (!exists) throw new NotFoundException({ message: 'Session not found', code: 'SESSION_NOT_FOUND' });
+
+    const isOwnVet = exists.vet.toString() === user.sub;
+    const isClinicMate = Boolean(user.clinicId) && exists.clinicId?.toString() === user.clinicId;
+    if (!isOwnVet && !isClinicMate) {
       throw new ForbiddenException({ message: 'This session does not belong to you', code: 'FORBIDDEN' });
     }
-    if (session.status !== 'payment_submitted') {
-      throw new BadRequestException({
-        message: 'Session must have a submitted payment proof to be verified',
-        code: 'INVALID_STATUS',
-      });
+    if (exists.status !== requiredStatus) {
+      throw new BadRequestException({ message: invalidStatusMessage, code: 'INVALID_STATUS' });
+    }
+    // Status matched but the atomic update still didn't apply — another
+    // concurrent request won the race between our read and our write.
+    throw new BadRequestException({
+      message: 'This session was already resolved by someone else',
+      code: 'ALREADY_RESOLVED',
+    });
+  }
+
+  async markConsultationPaid(user: JwtPayload, sessionId: string): Promise<ServiceResponse<null>> {
+    const now = new Date();
+
+    const updated = await this.consultationModel.findOneAndUpdate(
+      { ...this.consultationOwnershipFilter(user, sessionId), status: 'payment_submitted' },
+      {
+        $set: {
+          status: 'active',
+          paidAt: now,
+          startedAt: now,
+          autoExpireAt: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+          resolvedBy: new Types.ObjectId(user.sub),
+          resolvedByRole: user.staffRole ?? 'admin_vet',
+        },
+      },
+      { new: true },
+    ).exec();
+
+    if (!updated) {
+      return this.explainFailedConsultationTransition(
+        user,
+        sessionId,
+        'payment_submitted',
+        'Session must have a submitted payment proof to be verified',
+      );
     }
 
-    const now = new Date();
-    session.status = 'active';
-    session.paidAt = now;
-    session.startedAt = now;
-    session.autoExpireAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-    await session.save();
-
-    await this.postConsultationStatusMessage(session, 'doctor', 'active', 'Paid consultation started');
+    await this.postConsultationStatusMessage(updated, 'doctor', 'active', 'Paid consultation started');
 
     return { data: null, message: 'Consultation activated' };
   }
 
-  async endConsultation(vetId: string, sessionId: string): Promise<ServiceResponse<null>> {
-    const session = await this.consultationModel.findById(sessionId).exec();
-    if (!session) throw new NotFoundException({ message: 'Session not found', code: 'SESSION_NOT_FOUND' });
-    if (session.vet.toString() !== vetId) {
-      throw new ForbiddenException({ message: 'This session does not belong to you', code: 'FORBIDDEN' });
-    }
-    if (session.status !== 'active') {
-      throw new BadRequestException({
-        message: 'Only an active session can be ended',
-        code: 'INVALID_STATUS',
-      });
+  async disputeConsultation(user: JwtPayload, sessionId: string, reason: string): Promise<ServiceResponse<null>> {
+    const updated = await this.consultationModel.findOneAndUpdate(
+      { ...this.consultationOwnershipFilter(user, sessionId), status: 'payment_submitted' },
+      {
+        $set: {
+          status: 'disputed',
+          disputeReason: reason,
+          resolvedBy: new Types.ObjectId(user.sub),
+          resolvedByRole: user.staffRole ?? 'admin_vet',
+        },
+      },
+      { new: true },
+    ).exec();
+
+    if (!updated) {
+      return this.explainFailedConsultationTransition(
+        user,
+        sessionId,
+        'payment_submitted',
+        'Only a submitted payment can be disputed',
+      );
     }
 
-    session.status = 'closed';
-    session.closedBy = 'vet';
-    session.closedAt = new Date();
-    await session.save();
+    await this.postConsultationStatusMessage(updated, 'doctor', 'disputed', 'Payment disputed — escalated for review');
 
-    await this.postConsultationStatusMessage(session, 'doctor', 'closed', 'Consultation ended');
+    return { data: null, message: 'Consultation payment disputed' };
+  }
+
+  async endConsultation(user: JwtPayload, sessionId: string): Promise<ServiceResponse<null>> {
+    const updated = await this.consultationModel.findOneAndUpdate(
+      { ...this.consultationOwnershipFilter(user, sessionId), status: 'active' },
+      { $set: { status: 'closed', closedBy: 'vet', closedAt: new Date() } },
+      { new: true },
+    ).exec();
+
+    if (!updated) {
+      return this.explainFailedConsultationTransition(
+        user,
+        sessionId,
+        'active',
+        'Only an active session can be ended',
+      );
+    }
+
+    await this.postConsultationStatusMessage(updated, 'doctor', 'closed', 'Consultation ended');
 
     return { data: null, message: 'Consultation ended' };
   }
@@ -1682,7 +1890,8 @@ export class VetPortalService {
   }
 
   async updateVetPayoutAccount(vetId: string, accountNumber: string): Promise<ServiceResponse<null>> {
-    await this.vetModel.findByIdAndUpdate(vetId, { mobileAccount: accountNumber }).exec();
+    const clinicId = await this.requireClinicId(vetId);
+    await this.clinicModel.findByIdAndUpdate(clinicId, { mobileAccount: accountNumber }).exec();
     return { data: null, message: 'Payout account submitted for verification' };
   }
 

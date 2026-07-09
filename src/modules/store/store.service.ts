@@ -4,21 +4,31 @@ import { Model, Types } from 'mongoose';
 import { randomInt } from 'crypto';
 import { Product, ProductDocument } from '../../database/schemas/product.schema';
 import { Order, OrderDocument } from '../../database/schemas/order.schema';
-import { ServiceResponse, ProductResponse, OrderResponse } from '../../shared/types';
-import { toProductResponse, toOrderResponse } from '../../shared/mappers/store.mapper';
+import { User, UserDocument } from '../../database/schemas/user.schema';
+import { ServiceResponse, ProductResponse, OrderResponse, SubscriptionResponse } from '../../shared/types';
+import { toProductResponse, toOrderResponse, toSubscriptionResponse } from '../../shared/mappers/store.mapper';
 import { ListProductsDto } from './dto/list-products.dto';
 import { PlaceOrderDto } from './dto/place-order.dto';
 import { ListOrdersDto } from './dto/list-orders.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
+import { CreateSubscriptionDto } from '../subscriptions/dto/create-subscription.dto';
 import { UpdateSubscriptionDto } from '../subscriptions/dto/update-subscription.dto';
 
 const TERMINAL_STATUSES = new Set(['delivered', 'cancelled']);
+
+const INTERVAL_DAYS: Record<'weekly' | 'biweekly' | 'monthly' | 'quarterly', number> = {
+  weekly: 7,
+  biweekly: 14,
+  monthly: 30,
+  quarterly: 90,
+};
 
 @Injectable()
 export class StoreService {
   constructor(
     @InjectModel(Product.name) private readonly productModel: Model<ProductDocument>,
     @InjectModel(Order.name) private readonly orderModel: Model<OrderDocument>,
+    @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
   ) {}
 
   async listProducts(dto: ListProductsDto): Promise<ServiceResponse<ProductResponse[]>> {
@@ -190,7 +200,61 @@ export class StoreService {
     };
   }
 
-  async listSubscriptions(userId: string, page: number, limit: number): Promise<ServiceResponse<OrderResponse[]>> {
+  async createSubscription(userId: string, dto: CreateSubscriptionDto): Promise<ServiceResponse<SubscriptionResponse>> {
+    const product = await this.productModel.findById(dto.productId).lean();
+    if (!product) throw new NotFoundException({ code: 'PRODUCT_NOT_FOUND', message: 'Product not found' });
+    if (!product.inStock) {
+      throw new UnprocessableEntityException({ code: 'OUT_OF_STOCK', message: `${product.name} is out of stock` });
+    }
+
+    const user = await this.userModel.findById(userId).lean();
+    if (!user) throw new NotFoundException({ message: 'User not found', code: 'USER_NOT_FOUND' });
+
+    const defaultAddress = user.addresses.find((a) => a.isDefault) ?? user.addresses[0];
+    if (!defaultAddress) {
+      throw new BadRequestException({ code: 'ADDRESS_REQUIRED', message: 'Add a delivery address before creating a subscription' });
+    }
+
+    const qty = 1;
+    const unitPrice = product.price;
+    const orderId = `PC-${randomInt(100000, 999999)}`;
+
+    const order = await this.orderModel.create({
+      orderId,
+      user: userId,
+      store: product.store,
+      storeName: product.storeName,
+      items: [{
+        product: product._id,
+        name: product.name,
+        photo: product.photo ?? '',
+        variantId: null,
+        qty,
+        price: unitPrice,
+      }],
+      totalAmount: unitPrice * qty,
+      platformCommission: 0,
+      storePayout: unitPrice * qty,
+      status: 'active',
+      paymentMethod: dto.paymentMethod,
+      deliveryAddress: {
+        street: defaultAddress.street,
+        area: defaultAddress.area,
+        city: defaultAddress.city,
+        label: defaultAddress.label,
+      },
+      isSubscription: true,
+      interval: dto.interval,
+      nextOrderDate: this.computeNextOrderDate(dto.interval),
+    });
+
+    return {
+      data: toSubscriptionResponse(order.toObject() as Parameters<typeof toSubscriptionResponse>[0]),
+      message: 'Subscription created',
+    };
+  }
+
+  async listSubscriptions(userId: string, page: number, limit: number): Promise<ServiceResponse<SubscriptionResponse[]>> {
     const filter = { user: userId, isSubscription: true };
     const skip = (page - 1) * limit;
 
@@ -200,23 +264,23 @@ export class StoreService {
     ]);
 
     return {
-      data: orders.map((o) => toOrderResponse(o as Parameters<typeof toOrderResponse>[0])),
+      data: orders.map((o) => toSubscriptionResponse(o as Parameters<typeof toSubscriptionResponse>[0])),
       message: 'Subscriptions retrieved',
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
     };
   }
 
-  async getSubscription(userId: string, orderId: string): Promise<ServiceResponse<OrderResponse>> {
+  async getSubscription(userId: string, orderId: string): Promise<ServiceResponse<SubscriptionResponse>> {
     const order = await this.orderModel.findOne({ _id: orderId, user: userId, isSubscription: true }).lean();
     if (!order) throw new NotFoundException({ code: 'SUBSCRIPTION_NOT_FOUND', message: 'Subscription not found' });
 
     return {
-      data: toOrderResponse(order as Parameters<typeof toOrderResponse>[0]),
+      data: toSubscriptionResponse(order as Parameters<typeof toSubscriptionResponse>[0]),
       message: 'Subscription retrieved',
     };
   }
 
-  async updateSubscription(userId: string, orderId: string, dto: UpdateSubscriptionDto): Promise<ServiceResponse<OrderResponse>> {
+  async updateSubscription(userId: string, orderId: string, dto: UpdateSubscriptionDto): Promise<ServiceResponse<SubscriptionResponse>> {
     const order = await this.orderModel.findOne({ _id: orderId, user: userId, isSubscription: true });
     if (!order) throw new NotFoundException({ code: 'SUBSCRIPTION_NOT_FOUND', message: 'Subscription not found' });
 
@@ -225,12 +289,19 @@ export class StoreService {
     }
 
     if (dto.status) order.status = dto.status;
+    if (dto.interval) order.interval = dto.interval;
     if (dto.nextOrderDate !== undefined) order.nextOrderDate = dto.nextOrderDate;
     await order.save();
 
     return {
-      data: toOrderResponse(order.toObject() as Parameters<typeof toOrderResponse>[0]),
+      data: toSubscriptionResponse(order.toObject() as Parameters<typeof toSubscriptionResponse>[0]),
       message: 'Subscription updated',
     };
+  }
+
+  private computeNextOrderDate(interval: 'weekly' | 'biweekly' | 'monthly' | 'quarterly'): string {
+    const next = new Date();
+    next.setDate(next.getDate() + INTERVAL_DAYS[interval]);
+    return next.toISOString();
   }
 }

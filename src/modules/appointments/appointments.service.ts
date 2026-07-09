@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   HttpException,
@@ -15,12 +16,15 @@ import { Appointment, AppointmentDocument } from '../../database/schemas/appoint
 import { Review, ReviewDocument } from '../../database/schemas/review.schema';
 import { Vet, VetDocument } from '../../database/schemas/vet.schema';
 import { Pet, PetDocument } from '../../database/schemas/pet.schema';
+import { Clinic, ClinicDocument } from '../../database/schemas/clinic.schema';
 import { toAppointmentResponse } from '../../shared/mappers/appointment.mapper';
 import { toReviewResponse, ReviewRaw } from '../../shared/mappers/vet.mapper';
 import { AppointmentResponse, ReviewResponse, ServiceResponse } from '../../shared/types';
 import { CreateAppointmentDto } from './dto/create-appointment.dto';
 import { ListAppointmentsDto } from './dto/list-appointments.dto';
 import { SubmitReviewDto } from './dto/submit-review.dto';
+import { karachiDateStr, karachiDateTimeToUTC } from '../../shared/utils/karachi-time.util';
+import { S3Service } from '../../common/storage/s3.service';
 
 // Configurable platform commission — move to ConfigService when fee tiers are introduced
 const PLATFORM_COMMISSION_PKR = 150;
@@ -38,12 +42,14 @@ export class AppointmentsService {
     @InjectModel(Review.name) private readonly reviewModel: Model<ReviewDocument>,
     @InjectModel(Vet.name) private readonly vetModel: Model<VetDocument>,
     @InjectModel(Pet.name) private readonly petModel: Model<PetDocument>,
+    @InjectModel(Clinic.name) private readonly clinicModel: Model<ClinicDocument>,
+    private readonly s3Service: S3Service,
   ) {}
 
   @Cron(CronExpression.EVERY_HOUR)
   async markStaleAppointmentsNoShow(): Promise<void> {
     const now = new Date();
-    const todayStr = now.toISOString().slice(0, 10);
+    const todayStr = karachiDateStr(now);
 
     const pastDayResult = await this.appointmentModel.updateMany(
       { status: { $in: ['pending', 'confirmed'] }, date: { $lt: todayStr } },
@@ -56,7 +62,7 @@ export class AppointmentsService {
       .exec();
 
     const staleTodayIds = todaysAppointments
-      .filter((a) => new Date(`${a.date}T${a.timeSlot}:00`).getTime() < now.getTime() - NO_SHOW_GRACE_MS)
+      .filter((a) => karachiDateTimeToUTC(a.date, a.timeSlot).getTime() < now.getTime() - NO_SHOW_GRACE_MS)
       .map((a) => a._id);
 
     if (staleTodayIds.length > 0) {
@@ -146,7 +152,48 @@ export class AppointmentsService {
       },
     });
 
-    return { data: toAppointmentResponse(appointment), message: 'Appointment created' };
+    return { data: await this.toResponse(appointment), message: 'Appointment created' };
+  }
+
+  async submitPayment(
+    userId: string,
+    appointmentId: string,
+    proof: Express.Multer.File,
+  ): Promise<ServiceResponse<AppointmentResponse>> {
+    if (!Types.ObjectId.isValid(appointmentId)) {
+      throw new NotFoundException({ message: 'Appointment not found', code: 'APPOINTMENT_NOT_FOUND' });
+    }
+
+    // Ownership-scoped lookup collapses "doesn't exist" and "not yours" into one 404,
+    // mirroring /consultations/:id/submit-payment's contract rather than this file's
+    // findOwnedAppointment (404-vs-403 split) used elsewhere.
+    const appointment = await this.appointmentModel
+      .findOne({ _id: appointmentId, owner: new Types.ObjectId(userId) })
+      .exec();
+    if (!appointment) {
+      throw new NotFoundException({ message: 'Appointment not found', code: 'APPOINTMENT_NOT_FOUND' });
+    }
+
+    if (appointment.paymentMethod === 'cod') {
+      throw new BadRequestException({
+        message: 'Cash-on-delivery appointments do not require payment proof',
+        code: 'PROOF_NOT_APPLICABLE',
+      });
+    }
+    if (appointment.paymentStatus !== 'pending') {
+      throw new BadRequestException({
+        message: 'Payment proof can only be submitted while payment is pending',
+        code: 'INVALID_STATUS',
+      });
+    }
+
+    const proofKey = await this.s3Service.uploadPrivateImage(proof, 'appointment-payments');
+    appointment.paymentProofUrl = proofKey;
+    appointment.paymentSubmittedAt = new Date();
+    appointment.paymentStatus = 'proof_submitted';
+    await appointment.save();
+
+    return { data: await this.toResponse(appointment), message: 'Payment proof submitted' };
   }
 
   async listAppointments(
@@ -166,7 +213,7 @@ export class AppointmentsService {
     ]);
 
     return {
-      data: items.map(toAppointmentResponse),
+      data: await this.toResponseList(items),
       message: 'Appointments fetched',
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
     };
@@ -177,30 +224,38 @@ export class AppointmentsService {
     appointmentId: string,
   ): Promise<ServiceResponse<AppointmentResponse>> {
     const appointment = await this.findOwnedAppointment(userId, appointmentId);
-    return { data: toAppointmentResponse(appointment), message: 'Appointment fetched' };
+    return { data: await this.toResponse(appointment), message: 'Appointment fetched' };
+  }
+
+  async verifyAppointmentPayment(
+    vetId: string,
+    appointmentId: string,
+  ): Promise<ServiceResponse<AppointmentResponse>> {
+    const appointment = await this.findVetAppointment(vetId, appointmentId);
+
+    if (appointment.paymentStatus !== 'proof_submitted') {
+      throw new UnprocessableEntityException({
+        message: 'Only an appointment with submitted payment proof can be verified',
+        code: 'INVALID_STATUS_TRANSITION',
+      });
+    }
+
+    appointment.paymentStatus = 'held';
+    appointment.status = 'confirmed';
+    await appointment.save();
+
+    return { data: await this.toResponse(appointment), message: 'Payment verified — appointment confirmed' };
   }
 
   async completeAppointment(
+    vetId: string,
     appointmentId: string,
   ): Promise<ServiceResponse<AppointmentResponse>> {
-    if (!Types.ObjectId.isValid(appointmentId)) {
-      throw new NotFoundException({
-        message: 'Appointment not found',
-        code: 'APPOINTMENT_NOT_FOUND',
-      });
-    }
+    const appointment = await this.findVetAppointment(vetId, appointmentId);
 
-    const appointment = await this.appointmentModel.findById(appointmentId);
-    if (!appointment) {
-      throw new NotFoundException({
-        message: 'Appointment not found',
-        code: 'APPOINTMENT_NOT_FOUND',
-      });
-    }
-
-    if (!['pending', 'confirmed'].includes(appointment.status)) {
+    if (!['pending', 'confirmed', 'in-progress'].includes(appointment.status)) {
       throw new UnprocessableEntityException({
-        message: 'Only pending or confirmed appointments can be marked complete',
+        message: 'Only pending, confirmed, or in-progress appointments can be marked complete',
         code: 'INVALID_STATUS_TRANSITION',
       });
     }
@@ -209,7 +264,7 @@ export class AppointmentsService {
     appointment.paymentStatus = 'released';
     await appointment.save();
 
-    return { data: toAppointmentResponse(appointment), message: 'Appointment marked complete' };
+    return { data: await this.toResponse(appointment), message: 'Appointment marked complete' };
   }
 
   async cancelAppointment(
@@ -231,7 +286,7 @@ export class AppointmentsService {
     }
     await appointment.save();
 
-    return { data: toAppointmentResponse(appointment), message: 'Appointment cancelled' };
+    return { data: await this.toResponse(appointment), message: 'Appointment cancelled' };
   }
 
   async submitReview(
@@ -303,6 +358,45 @@ export class AppointmentsService {
     );
   }
 
+  private async toResponse(appointment: AppointmentDocument): Promise<AppointmentResponse> {
+    const [response] = await this.toResponseList([appointment]);
+    return response;
+  }
+
+  // Batches the vet->clinic payout-account lookup and resolves a fresh signed proof URL for
+  // every appointment in one pass, so listAppointments doesn't N+1 per row.
+  private async toResponseList(appointments: AppointmentDocument[]): Promise<AppointmentResponse[]> {
+    if (appointments.length === 0) return [];
+
+    const vetIds = [...new Set(
+      appointments.filter((a) => a.paymentMethod !== 'cod').map((a) => a.vet.toString()),
+    )];
+    const vets = vetIds.length
+      ? await this.vetModel.find({ _id: { $in: vetIds } }).select('clinicId').lean().exec()
+      : [];
+    const clinicIds = [...new Set(
+      vets.filter((v) => v.clinicId).map((v) => (v.clinicId as Types.ObjectId).toString()),
+    )];
+    const clinics = clinicIds.length
+      ? await this.clinicModel.find({ _id: { $in: clinicIds } }).lean().exec()
+      : [];
+    const clinicMap = new Map(clinics.map((c) => [(c._id as Types.ObjectId).toString(), c]));
+    const vetClinicMap = new Map(
+      vets.map((v) => [
+        (v._id as Types.ObjectId).toString(),
+        v.clinicId ? (clinicMap.get((v.clinicId as Types.ObjectId).toString()) ?? null) : null,
+      ]),
+    );
+
+    return Promise.all(appointments.map(async (a) => {
+      const clinic = a.paymentMethod === 'cod' ? null : vetClinicMap.get(a.vet.toString()) ?? null;
+      const paymentProofUrl = a.paymentProofUrl
+        ? await this.s3Service.getSignedReadUrl(a.paymentProofUrl)
+        : null;
+      return toAppointmentResponse(a, paymentProofUrl, clinic);
+    }));
+  }
+
   private async findOwnedAppointment(
     userId: string,
     appointmentId: string,
@@ -323,6 +417,32 @@ export class AppointmentsService {
     }
 
     if (appointment.owner.toString() !== userId) {
+      throw new ForbiddenException({ message: 'Not authorized', code: 'FORBIDDEN' });
+    }
+
+    return appointment;
+  }
+
+  private async findVetAppointment(
+    vetId: string,
+    appointmentId: string,
+  ): Promise<AppointmentDocument> {
+    if (!Types.ObjectId.isValid(appointmentId)) {
+      throw new NotFoundException({
+        message: 'Appointment not found',
+        code: 'APPOINTMENT_NOT_FOUND',
+      });
+    }
+
+    const appointment = await this.appointmentModel.findById(appointmentId);
+    if (!appointment) {
+      throw new NotFoundException({
+        message: 'Appointment not found',
+        code: 'APPOINTMENT_NOT_FOUND',
+      });
+    }
+
+    if (appointment.vet.toString() !== vetId) {
       throw new ForbiddenException({ message: 'Not authorized', code: 'FORBIDDEN' });
     }
 

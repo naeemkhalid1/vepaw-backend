@@ -20,6 +20,7 @@ import { UpdatePrivacyDto } from './dto/update-privacy.dto';
 import { UpdateNotificationsDto } from './dto/update-notifications.dto';
 import { CreateAddressDto } from './dto/create-address.dto';
 import { UpdateAddressDto } from './dto/update-address.dto';
+import { CreatePaymentMethodDto } from './dto/create-payment-method.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { imageUploadOptions } from '../../common/storage/image-upload.options';
 import type { JwtPayload } from '../../shared/types';
@@ -108,5 +109,19 @@ export class UsersController {
   @ApiOperation({ summary: 'Delete a saved address' })
   deleteAddress(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
     return this.usersService.deleteAddress(user.sub, id);
+  }
+
+  // ── Payment methods ──────────────────────────────────────────────────────────
+
+  @Get('me/payment-methods')
+  @ApiOperation({ summary: 'List saved payment methods' })
+  getPaymentMethods(@CurrentUser() user: JwtPayload) {
+    return this.usersService.getPaymentMethods(user.sub);
+  }
+
+  @Post('me/payment-methods')
+  @ApiOperation({ summary: 'Save a new payment method — account number is masked before being returned' })
+  addPaymentMethod(@CurrentUser() user: JwtPayload, @Body() dto: CreatePaymentMethodDto) {
+    return this.usersService.addPaymentMethod(user.sub, dto);
   }
 }

@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsString } from 'class-validator';
+import { IsIn, IsNotEmpty, IsString } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class InviteTeamMemberDto {
@@ -7,8 +7,8 @@ export class InviteTeamMemberDto {
   @IsNotEmpty()
   emailOrPhone: string;
 
-  @ApiProperty()
+  @ApiProperty({ enum: ['team_vet', 'accountant'] })
   @IsString()
-  @IsNotEmpty()
-  role: string;
+  @IsIn(['team_vet', 'accountant'])
+  role: 'team_vet' | 'accountant';
 }

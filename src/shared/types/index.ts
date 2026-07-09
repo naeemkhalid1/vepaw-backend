@@ -4,6 +4,8 @@ export interface JwtPayload {
   sub: string;
   phone: string;
   role: UserRole;
+  clinicId?: string;
+  staffRole?: 'admin_vet' | 'team_vet' | 'accountant';
 }
 
 export interface PaginationMeta {
@@ -49,6 +51,13 @@ export interface SavedAddress {
   street: string;
   area: string;
   city: string;
+  isDefault: boolean;
+}
+
+export interface SavedPaymentMethod {
+  id: string;
+  provider: string;
+  maskedNumber: string;
   isDefault: boolean;
 }
 
@@ -181,6 +190,13 @@ export interface AppointmentResponse {
   paymentMethod: string;
   paymentStatus: string;
   paymentReference: string | null;
+  paymentProofUrl: string | null;
+  paymentSubmittedAt: Date | null;
+  paymentAccount: {
+    payoutMethod: string | null;
+    accountTitle: string | null;
+    mobileAccount: string | null;
+  } | null;
   notes: string | null;
   reviewId: string | null;
   vetDetails: { name: string; clinicName: string; address: string; phone: string };
@@ -247,6 +263,20 @@ export interface OrderResponse {
   updatedAt: Date;
 }
 
+export interface SubscriptionResponse {
+  id: string;
+  user: string;
+  product: string;
+  productName: string;
+  productPhoto: string | null;
+  storeName: string;
+  qty: number;
+  interval: 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | null;
+  nextOrderDate: string | null;
+  subscriberPrice: number;
+  status: string;
+}
+
 export interface NotificationResponse {
   id: string;
   type: string;
@@ -301,7 +331,7 @@ export interface ClinicRequestPayload {
 
 export interface ConsultationStatusPayload {
   sessionId: string;
-  status: 'pending_payment' | 'payment_submitted' | 'active' | 'closed' | 'expired';
+  status: 'pending_payment' | 'payment_submitted' | 'active' | 'disputed' | 'closed' | 'expired' | 'cancelled';
 }
 
 export interface MessageResponse {
@@ -341,19 +371,26 @@ export interface ClinicDispenseResponse {
 export interface ConsultationSessionResponse {
   id: string;
   owner: string;
+  ownerName: string;
   pet: string;
   petName: string;
   vet: string;
   vetName: string;
   amount: number;
-  status: 'pending_payment' | 'payment_submitted' | 'active' | 'closed' | 'expired';
+  status: 'pending_payment' | 'payment_submitted' | 'active' | 'disputed' | 'closed' | 'expired' | 'cancelled';
   paymentProofUrl: string | null;
   paymentSubmittedAt: Date | null;
   paidAt: Date | null;
   startedAt: Date | null;
   autoExpireAt: Date | null;
   closedAt: Date | null;
-  closedBy: 'vet' | 'system' | null;
+  closedBy: 'vet' | 'system' | 'admin' | null;
+  resolvedBy: string | null;
+  resolvedByRole: 'admin_vet' | 'team_vet' | 'accountant' | null;
+  disputeReason: string | null;
+  adminResolvedBy: string | null;
+  adminResolvedAt: Date | null;
+  refundRequired: boolean;
   paymentAccount: {
     payoutMethod: string | null;
     accountTitle: string | null;

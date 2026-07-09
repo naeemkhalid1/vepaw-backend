@@ -1,6 +1,6 @@
 import { Types } from 'mongoose';
 import { ConsultationSession } from '../../database/schemas/consultation-session.schema';
-import { Vet } from '../../database/schemas/vet.schema';
+import { Clinic } from '../../database/schemas/clinic.schema';
 import { ConsultationSessionResponse } from '../types';
 
 type ConsultationSessionDoc = ConsultationSession & {
@@ -13,11 +13,13 @@ export function toConsultationSessionResponse(
   s: ConsultationSessionDoc,
   petName: string,
   vetName: string,
-  vet?: Pick<Vet, 'payoutMethod' | 'accountTitle' | 'mobileAccount'> | null,
+  ownerName: string,
+  clinic?: Pick<Clinic, 'payoutMethod' | 'accountTitle' | 'mobileAccount'> | null,
 ): ConsultationSessionResponse {
   return {
     id: s._id.toString(),
     owner: (s.owner as Types.ObjectId).toString(),
+    ownerName,
     pet: (s.pet as Types.ObjectId).toString(),
     petName,
     vet: (s.vet as Types.ObjectId).toString(),
@@ -31,11 +33,17 @@ export function toConsultationSessionResponse(
     autoExpireAt: s.autoExpireAt,
     closedAt: s.closedAt,
     closedBy: s.closedBy,
-    paymentAccount: vet
+    resolvedBy: s.resolvedBy ? (s.resolvedBy as Types.ObjectId).toString() : null,
+    resolvedByRole: s.resolvedByRole,
+    disputeReason: s.disputeReason,
+    adminResolvedBy: s.adminResolvedBy ? (s.adminResolvedBy as Types.ObjectId).toString() : null,
+    adminResolvedAt: s.adminResolvedAt,
+    refundRequired: s.refundRequired,
+    paymentAccount: clinic
       ? {
-          payoutMethod: vet.payoutMethod,
-          accountTitle: vet.accountTitle,
-          mobileAccount: vet.mobileAccount,
+          payoutMethod: clinic.payoutMethod,
+          accountTitle: clinic.accountTitle,
+          mobileAccount: clinic.mobileAccount,
         }
       : null,
     createdAt: s.createdAt,

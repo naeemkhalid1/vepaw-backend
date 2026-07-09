@@ -1,8 +1,13 @@
 import { Types } from 'mongoose';
 import { AppointmentDocument } from '../../database/schemas/appointment.schema';
+import { Clinic } from '../../database/schemas/clinic.schema';
 import { AppointmentResponse } from '../types';
 
-export function toAppointmentResponse(apt: AppointmentDocument): AppointmentResponse {
+export function toAppointmentResponse(
+  apt: AppointmentDocument,
+  paymentProofUrl: string | null,
+  clinic?: Pick<Clinic, 'payoutMethod' | 'accountTitle' | 'mobileAccount'> | null,
+): AppointmentResponse {
   return {
     id: apt._id.toString(),
     pet: apt.pet.toString(),
@@ -17,6 +22,15 @@ export function toAppointmentResponse(apt: AppointmentDocument): AppointmentResp
     paymentMethod: apt.paymentMethod,
     paymentStatus: apt.paymentStatus,
     paymentReference: apt.paymentReference,
+    paymentProofUrl,
+    paymentSubmittedAt: apt.paymentSubmittedAt,
+    paymentAccount: clinic
+      ? {
+          payoutMethod: clinic.payoutMethod,
+          accountTitle: clinic.accountTitle,
+          mobileAccount: clinic.mobileAccount,
+        }
+      : null,
     notes: apt.notes,
     reviewId: apt.reviewId ? (apt.reviewId as Types.ObjectId).toString() : null,
     vetDetails: apt.vetDetails,

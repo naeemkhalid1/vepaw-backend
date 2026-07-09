@@ -57,11 +57,13 @@ export class Order {
 
   @Prop({
     type: String,
-    enum: ['pending', 'confirmed', 'packed', 'dispatched', 'delivered', 'cancelled'],
+    enum: ['pending', 'confirmed', 'packed', 'dispatched', 'delivered', 'cancelled', 'active', 'paused'],
     default: 'pending',
     index: true,
   })
-  status: 'pending' | 'confirmed' | 'packed' | 'dispatched' | 'delivered' | 'cancelled';
+  // 'active'/'paused' are subscription-lifecycle states (isSubscription: true orders only);
+  // the rest are one-off fulfillment states.
+  status: 'pending' | 'confirmed' | 'packed' | 'dispatched' | 'delivered' | 'cancelled' | 'active' | 'paused';
 
   @Prop({
     type: String,
@@ -90,6 +92,13 @@ export class Order {
 
   @Prop({ default: false })
   isSubscription: boolean;
+
+  @Prop({
+    type: String,
+    enum: ['weekly', 'biweekly', 'monthly', 'quarterly', null],
+    default: null,
+  })
+  interval: 'weekly' | 'biweekly' | 'monthly' | 'quarterly' | null;
 
   @Prop({ type: String, default: null })
   nextOrderDate: string | null;

@@ -4,14 +4,16 @@ import { Model, Types } from 'mongoose';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { Pet, PetDocument } from '../../database/schemas/pet.schema';
 import { toUserResponse } from '../../shared/mappers/user.mapper';
-import { ReminderResponse, SavedAddress, ServiceResponse, UserResponse } from '../../shared/types';
+import { ReminderResponse, SavedAddress, SavedPaymentMethod, ServiceResponse, UserResponse } from '../../shared/types';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { UpdateFcmTokenDto } from './dto/update-fcm-token.dto';
 import { UpdatePrivacyDto } from './dto/update-privacy.dto';
 import { UpdateNotificationsDto } from './dto/update-notifications.dto';
 import { CreateAddressDto } from './dto/create-address.dto';
 import { UpdateAddressDto } from './dto/update-address.dto';
+import { CreatePaymentMethodDto } from './dto/create-payment-method.dto';
 import { S3Service } from '../../common/storage/s3.service';
+import { karachiDateStr } from '../../shared/utils/karachi-time.util';
 
 const REMINDER_WINDOW_DAYS = 30;
 
@@ -149,12 +151,8 @@ export class UsersService {
   }
 
   async getReminders(userId: string): Promise<ServiceResponse<ReminderResponse | null>> {
-    const today = new Date();
-    const todayStr = this.toDateStr(today);
-
-    const limitDate = new Date(today);
-    limitDate.setDate(limitDate.getDate() + REMINDER_WINDOW_DAYS);
-    const limitStr = this.toDateStr(limitDate);
+    const todayStr = karachiDateStr();
+    const limitStr = karachiDateStr(new Date(Date.now() + REMINDER_WINDOW_DAYS * 86_400_000));
 
     const pets = await this.petModel
       .find({ owner: new Types.ObjectId(userId), isActive: true, remindersEnabled: true })
@@ -165,7 +163,7 @@ export class UsersService {
     for (const pet of pets) {
       for (const vax of pet.vaccinations) {
         if (vax.nextDue >= todayStr && vax.nextDue <= limitStr) {
-          const daysUntilDue = this.daysBetween(today, new Date(vax.nextDue));
+          const daysUntilDue = this.daysBetween(todayStr, vax.nextDue);
           if (!earliest || daysUntilDue < earliest.daysUntilDue) {
             earliest = {
               petId: pet._id.toString(),
@@ -262,6 +260,50 @@ export class UsersService {
     await user.save();
   }
 
+  // ── Payment methods ──────────────────────────────────────────────────────────
+
+  async getPaymentMethods(userId: string): Promise<ServiceResponse<SavedPaymentMethod[]>> {
+    const user = await this.userModel.findById(userId).exec();
+    if (!user) throw new NotFoundException({ message: 'User not found', code: 'USER_NOT_FOUND' });
+
+    return {
+      data: user.paymentMethods.map(this.toPaymentMethodResponse),
+      message: 'Payment methods retrieved',
+    };
+  }
+
+  async addPaymentMethod(userId: string, dto: CreatePaymentMethodDto): Promise<ServiceResponse<SavedPaymentMethod>> {
+    const user = await this.userModel.findById(userId).exec();
+    if (!user) throw new NotFoundException({ message: 'User not found', code: 'USER_NOT_FOUND' });
+
+    const setAsDefault = user.paymentMethods.length === 0;
+
+    user.paymentMethods.push({
+      provider: dto.provider,
+      phoneNumber: dto.phoneNumber,
+      isDefault: setAsDefault,
+    } as Parameters<typeof user.paymentMethods.push>[0]);
+
+    await user.save();
+
+    const created = user.paymentMethods[user.paymentMethods.length - 1];
+    return { data: this.toPaymentMethodResponse(created), message: 'Payment method added' };
+  }
+
+  private toPaymentMethodResponse(pm: { _id: Types.ObjectId; provider: string; phoneNumber: string; isDefault: boolean }): SavedPaymentMethod {
+    return {
+      id: pm._id.toString(),
+      provider: pm.provider,
+      maskedNumber: UsersService.maskPhoneNumber(pm.phoneNumber),
+      isDefault: pm.isDefault,
+    };
+  }
+
+  private static maskPhoneNumber(phoneNumber: string): string {
+    if (phoneNumber.length < 8) return phoneNumber;
+    return `${phoneNumber.slice(0, 4)} *** ${phoneNumber.slice(-4)}`;
+  }
+
   private toAddressResponse(addr: { _id: Types.ObjectId; label: string; street: string; area: string; city: string; isDefault: boolean }): SavedAddress {
     return {
       id: addr._id.toString(),
@@ -273,13 +315,11 @@ export class UsersService {
     };
   }
 
-  private toDateStr(date: Date): string {
-    return date.toISOString().split('T')[0];
-  }
-
-  private daysBetween(from: Date, to: Date): number {
-    const fromDay = new Date(from.getFullYear(), from.getMonth(), from.getDate());
-    const toDay = new Date(to.getFullYear(), to.getMonth(), to.getDate());
-    return Math.ceil((toDay.getTime() - fromDay.getTime()) / 86_400_000);
+  // Both args are plain "YYYY-MM-DD" strings — comparing via Date.UTC keeps this
+  // independent of the host process's local timezone (see karachi-time.util.ts).
+  private daysBetween(fromStr: string, toStr: string): number {
+    const [fy, fm, fd] = fromStr.split('-').map(Number);
+    const [ty, tm, td] = toStr.split('-').map(Number);
+    return Math.round((Date.UTC(ty, tm - 1, td) - Date.UTC(fy, fm - 1, fd)) / 86_400_000);
   }
 }

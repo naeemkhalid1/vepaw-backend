@@ -1,4 +1,12 @@
-import { Inject, Injectable, Logger, NotFoundException, UnauthorizedException, forwardRef } from '@nestjs/common';
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+  UnauthorizedException,
+  forwardRef,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -8,6 +16,7 @@ import { AuthService } from '../auth/auth.service';
 import { EmailService } from '../../common/email/email.service';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { Vet, VetDocument } from '../../database/schemas/vet.schema';
+import { Clinic, ClinicDocument } from '../../database/schemas/clinic.schema';
 import { Store, StoreDocument } from '../../database/schemas/store.schema';
 import { Order, OrderDocument } from '../../database/schemas/order.schema';
 import { Appointment, AppointmentDocument } from '../../database/schemas/appointment.schema';
@@ -16,7 +25,14 @@ import { VetApplication, VetApplicationDocument } from '../../database/schemas/v
 import { CommissionTier, CommissionTierDocument } from '../../database/schemas/commission-tier.schema';
 import { Broadcast, BroadcastDocument } from '../../database/schemas/broadcast.schema';
 import { Payout, PayoutDocument } from '../../database/schemas/payout.schema';
-import { ServiceResponse } from '../../shared/types';
+import {
+  ConsultationSession,
+  ConsultationSessionDocument,
+} from '../../database/schemas/consultation-session.schema';
+import { Thread, ThreadDocument } from '../../database/schemas/thread.schema';
+import { Message, MessageDocument } from '../../database/schemas/message.schema';
+import { ChatGateway } from '../realtime/gateways/chat.gateway';
+import { ServiceResponse, MessageResponse } from '../../shared/types';
 import { CreateCommissionTierDto } from './dto/create-commission-tier.dto';
 import { UpdateCommissionTierDto } from './dto/update-commission-tier.dto';
 import { SendBroadcastDto } from './dto/send-broadcast.dto';
@@ -53,6 +69,7 @@ export class AdminService {
   constructor(
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     @InjectModel(Vet.name) private readonly vetModel: Model<VetDocument>,
+    @InjectModel(Clinic.name) private readonly clinicModel: Model<ClinicDocument>,
     @InjectModel(Store.name) private readonly storeModel: Model<StoreDocument>,
     @InjectModel(Order.name) private readonly orderModel: Model<OrderDocument>,
     @InjectModel(Appointment.name) private readonly appointmentModel: Model<AppointmentDocument>,
@@ -61,6 +78,11 @@ export class AdminService {
     @InjectModel(CommissionTier.name) private readonly commissionTierModel: Model<CommissionTierDocument>,
     @InjectModel(Broadcast.name) private readonly broadcastModel: Model<BroadcastDocument>,
     @InjectModel(Payout.name) private readonly payoutModel: Model<PayoutDocument>,
+    @InjectModel(ConsultationSession.name)
+    private readonly consultationModel: Model<ConsultationSessionDocument>,
+    @InjectModel(Thread.name) private readonly threadModel: Model<ThreadDocument>,
+    @InjectModel(Message.name) private readonly messageModel: Model<MessageDocument>,
+    private readonly chatGateway: ChatGateway,
     private readonly config: ConfigService,
     private readonly jwtService: JwtService,
     @Inject(forwardRef(() => AuthService)) private readonly authService: AuthService,
@@ -255,28 +277,6 @@ export class AdminService {
       },
       message: 'Application detail retrieved',
     };
-  }
-
-  async approveVetApplication(id: string): Promise<ServiceResponse<null>> {
-    const app = await this.vetApplicationModel.findById(id).exec();
-    if (!app) throw new NotFoundException('Application not found');
-    app.status = 'approved';
-    await app.save();
-    const existing = await this.vetModel.findOne({ email: app.email }).exec();
-    if (existing) {
-      existing.verified = true; existing.applicationStatus = 'approved'; existing.subscriptionStatus = 'active';
-      await existing.save();
-    } else {
-      await this.vetModel.create({
-        name: app.fullName, clinicName: app.clinicName, email: app.email, phone: app.phone,
-        address: app.fullAddress, city: app.city, area: app.area,
-        fee: { min: app.feeMin, max: app.feeMax }, specializations: app.specialisations,
-        languages: app.languages, yearsExperience: app.yearsOfExperience,
-        pvmcNumber: app.pvmcNumber, primaryQualification: app.primaryQualification,
-        university: app.university, verified: true, applicationStatus: 'approved', subscriptionStatus: 'active',
-      });
-    }
-    return { data: null, message: 'Application approved' };
   }
 
   async rejectVetApplication(id: string): Promise<ServiceResponse<null>> {
@@ -500,6 +500,20 @@ export class AdminService {
       const existing = await this.vetModel.findOne({ email: app.email }).exec();
       if (existing) {
         existing.verified = true; existing.applicationStatus = 'approved'; existing.subscriptionStatus = 'active';
+        // Defensive: an already-linked vet (e.g. one created via the team-invite flow)
+        // must not get a second orphan clinic on re-approval.
+        if (!existing.clinicId) {
+          const clinic = await this.clinicModel.create({
+            name: app.clinicName,
+            payoutMethod: app.payoutMethod,
+            accountTitle: app.accountTitle,
+            mobileAccount: app.mobileAccount,
+            cnicOnAccount: app.cnicOnAccount,
+            ownerId: existing._id,
+          });
+          existing.clinicId = clinic._id as Types.ObjectId;
+          existing.staffRole = 'admin_vet';
+        }
         await existing.save();
         vetId = existing._id.toString();
       } else {
@@ -511,6 +525,17 @@ export class AdminService {
           pvmcNumber: app.pvmcNumber, primaryQualification: app.primaryQualification,
           university: app.university, verified: true, applicationStatus: 'approved', subscriptionStatus: 'active',
         });
+        const clinic = await this.clinicModel.create({
+          name: app.clinicName,
+          payoutMethod: app.payoutMethod,
+          accountTitle: app.accountTitle,
+          mobileAccount: app.mobileAccount,
+          cnicOnAccount: app.cnicOnAccount,
+          ownerId: newVet._id,
+        });
+        newVet.clinicId = clinic._id as Types.ObjectId;
+        newVet.staffRole = 'admin_vet';
+        await newVet.save();
         vetId = newVet._id.toString();
       }
 
@@ -552,6 +577,99 @@ export class AdminService {
       return { data: null, message: 'Escrow released' };
     }
     throw new NotFoundException('Transaction not found or not eligible for release');
+  }
+
+  async resolveDisputedConsultation(
+    sessionId: string,
+    adminId: string,
+    outcome: 'approve' | 'reject',
+  ): Promise<ServiceResponse<null>> {
+    const now = new Date();
+
+    const update =
+      outcome === 'approve'
+        ? {
+            status: 'active' as const,
+            paidAt: now,
+            startedAt: now,
+            autoExpireAt: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+            adminResolvedBy: new Types.ObjectId(adminId),
+            adminResolvedAt: now,
+          }
+        : {
+            status: 'expired' as const,
+            refundRequired: true,
+            adminResolvedBy: new Types.ObjectId(adminId),
+            adminResolvedAt: now,
+            closedBy: 'admin' as const,
+            closedAt: now,
+          };
+
+    const updated = await this.consultationModel.findOneAndUpdate(
+      { _id: new Types.ObjectId(sessionId), status: 'disputed' },
+      { $set: update },
+      { new: true },
+    ).exec();
+
+    if (!updated) {
+      const exists = await this.consultationModel.findById(sessionId).lean().exec();
+      if (!exists) throw new NotFoundException({ message: 'Session not found', code: 'SESSION_NOT_FOUND' });
+      throw new BadRequestException({
+        message: 'This session is not currently disputed — it may have already been resolved',
+        code: 'INVALID_STATUS',
+      });
+    }
+
+    await this.postConsultationStatusMessage(
+      updated,
+      outcome === 'approve' ? 'active' : 'expired',
+      outcome === 'approve' ? 'Payment dispute resolved — consultation started' : 'Payment dispute rejected — consultation ended',
+    );
+
+    return { data: null, message: `Disputed consultation ${outcome === 'approve' ? 'approved' : 'rejected'}` };
+  }
+
+  private async postConsultationStatusMessage(
+    session: ConsultationSessionDocument,
+    status: ConsultationSessionDocument['status'],
+    previewText: string,
+  ): Promise<void> {
+    const threadId = session.thread as Types.ObjectId;
+    const sender = 'doctor' as const;
+
+    const message = await this.messageModel.create({
+      thread: threadId,
+      type: 'consultation_status',
+      sender,
+      text: null,
+      consultationStatus: {
+        sessionId: session._id,
+        status,
+      },
+    });
+
+    await this.threadModel.findByIdAndUpdate(threadId, {
+      preview: previewText,
+      $inc: { unread: 1 },
+    });
+
+    const response: MessageResponse = {
+      id: (message._id as Types.ObjectId).toString(),
+      thread: threadId.toString(),
+      type: 'consultation_status',
+      sender,
+      text: null,
+      product: null,
+      pet: null,
+      clinicRequest: null,
+      consultationStatus: {
+        sessionId: (session._id as Types.ObjectId).toString(),
+        status,
+      },
+      createdAt: (message as MessageDocument).createdAt,
+    };
+
+    this.chatGateway.server.to(threadId.toString()).emit('message:received', response);
   }
 
   async deleteCommissionTier(id: string): Promise<ServiceResponse<null>> {

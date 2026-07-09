@@ -19,11 +19,14 @@ import { UpdateCommissionTierDto } from './dto/update-commission-tier.dto';
 import { SendBroadcastDto } from './dto/send-broadcast.dto';
 import { ScheduleBroadcastDto } from './dto/schedule-broadcast.dto';
 import { AdminLoginDto } from '../auth/dto/admin-login.dto';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import type { JwtPayload } from '../../shared/types';
 import {
   UpdateVetApplicationStatusDto,
   UpdateStoreApplicationStatusDto,
   UpdateUserStatusDto,
   UpdateTransactionStatusDto,
+  ResolveConsultationDto,
 } from './dto/update-status.dto';
 
 // ─── Admin Auth ──────────────────────────────────────
@@ -186,6 +189,23 @@ export class AdminTransactionsController {
   @ApiOperation({ summary: 'Release escrow payout' })
   releaseEscrow(@Param('id') id: string) {
     return this.service.releaseEscrow(id);
+  }
+}
+
+// ─── Consultations ──────────────────────────────────────
+
+@ApiTags('admin-consultations')
+@Controller('admin/consultations')
+@ApiBearerAuth()
+@Roles('admin')
+export class AdminConsultationsController {
+  constructor(private readonly service: AdminService) {}
+
+  @Post(':id/resolve')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Resolve a disputed consultation payment (approve or reject)' })
+  resolve(@CurrentUser() admin: JwtPayload, @Param('id') id: string, @Body() dto: ResolveConsultationDto) {
+    return this.service.resolveDisputedConsultation(id, admin.sub, dto.outcome);
   }
 }
 

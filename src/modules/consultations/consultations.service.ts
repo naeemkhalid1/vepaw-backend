@@ -9,15 +9,17 @@ import {
 import { Appointment, AppointmentDocument } from '../../database/schemas/appointment.schema';
 import { Pet, PetDocument } from '../../database/schemas/pet.schema';
 import { Vet, VetDocument } from '../../database/schemas/vet.schema';
+import { Clinic, ClinicDocument } from '../../database/schemas/clinic.schema';
 import { Thread, ThreadDocument } from '../../database/schemas/thread.schema';
 import { Message, MessageDocument } from '../../database/schemas/message.schema';
+import { User, UserDocument } from '../../database/schemas/user.schema';
 import { S3Service } from '../../common/storage/s3.service';
 import { toConsultationSessionResponse } from '../../shared/mappers/consultation.mapper';
 import { ConsultationSessionResponse, MessageResponse, ServiceResponse } from '../../shared/types';
 import { CreateConsultationDto } from './dto/create-consultation.dto';
 import { ChatGateway } from '../realtime/gateways/chat.gateway';
 
-const ACTIVE_OR_PENDING_STATUSES = ['pending_payment', 'payment_submitted', 'active'] as const;
+const ACTIVE_OR_PENDING_STATUSES = ['pending_payment', 'payment_submitted', 'active', 'disputed'] as const;
 
 @Injectable()
 export class ConsultationsService {
@@ -29,8 +31,10 @@ export class ConsultationsService {
     @InjectModel(Appointment.name) private readonly appointmentModel: Model<AppointmentDocument>,
     @InjectModel(Pet.name) private readonly petModel: Model<PetDocument>,
     @InjectModel(Vet.name) private readonly vetModel: Model<VetDocument>,
+    @InjectModel(Clinic.name) private readonly clinicModel: Model<ClinicDocument>,
     @InjectModel(Thread.name) private readonly threadModel: Model<ThreadDocument>,
     @InjectModel(Message.name) private readonly messageModel: Model<MessageDocument>,
+    @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     private readonly s3Service: S3Service,
     private readonly chatGateway: ChatGateway,
   ) {}
@@ -44,6 +48,8 @@ export class ConsultationsService {
     if (pet.owner.toString() !== userId) {
       throw new ForbiddenException({ message: 'You do not own this pet', code: 'FORBIDDEN' });
     }
+
+    const owner = await this.userModel.findById(userId).select('name').lean().exec();
 
     const vetObjectId = new Types.ObjectId(dto.vetId);
     const vet = await this.vetModel.findById(vetObjectId).lean().exec();
@@ -98,6 +104,7 @@ export class ConsultationsService {
       owner: ownerObjectId,
       pet: petObjectId,
       vet: vetObjectId,
+      clinicId: vet.clinicId ?? null,
       thread: thread._id,
       amount: vet.textConsultFee,
       status: 'pending_payment',
@@ -105,8 +112,10 @@ export class ConsultationsService {
 
     await this.postStatusMessage(session, thread._id as Types.ObjectId, 'user', 'pending_payment', 'Consultation requested');
 
+    const clinic = vet.clinicId ? await this.clinicModel.findById(vet.clinicId).lean().exec() : null;
+
     return {
-      data: toConsultationSessionResponse(session.toObject(), pet.name, vet.name, vet),
+      data: toConsultationSessionResponse(session.toObject(), pet.name, vet.name, owner?.name ?? 'Owner', clinic),
       message: 'Consultation session created — awaiting payment',
     };
   }
@@ -154,22 +163,68 @@ export class ConsultationsService {
       });
     }
 
-    const proofUrl = await this.s3Service.uploadImage(proof, 'consultation-payments');
-    session.paymentProofUrl = proofUrl;
+    const proofKey = await this.s3Service.uploadPrivateImage(proof, 'consultation-payments');
+    session.paymentProofUrl = proofKey;
     session.paymentSubmittedAt = new Date();
     session.status = 'payment_submitted';
     await session.save();
 
     await this.postStatusMessage(session, session.thread as Types.ObjectId, 'user', 'payment_submitted', 'Payment submitted, awaiting vet confirmation');
 
-    const [pet, vet] = await Promise.all([
+    const [pet, vet, owner] = await Promise.all([
       this.petModel.findById(session.pet).select('name').lean().exec(),
       this.vetModel.findById(session.vet).lean().exec(),
+      this.userModel.findById(session.owner).select('name').lean().exec(),
     ]);
+    const clinic = vet?.clinicId ? await this.clinicModel.findById(vet.clinicId).lean().exec() : null;
+
+    const sessionObj = session.toObject();
+    sessionObj.paymentProofUrl = await this.s3Service.getSignedReadUrl(proofKey);
 
     return {
-      data: toConsultationSessionResponse(session.toObject(), pet?.name ?? 'Pet', vet?.name ?? 'Vet', vet),
+      data: toConsultationSessionResponse(sessionObj, pet?.name ?? 'Pet', vet?.name ?? 'Vet', owner?.name ?? 'Owner', clinic),
       message: 'Payment proof submitted',
+    };
+  }
+
+  async cancelConsultation(
+    userId: string,
+    sessionId: string,
+  ): Promise<ServiceResponse<ConsultationSessionResponse>> {
+    const ownerObjectId = new Types.ObjectId(userId);
+
+    // Atomic ownership+status-scoped update: a session that isn't found by this filter is
+    // either not owned by this caller or doesn't exist — both collapse to 404 below, matching
+    // the same "don't reveal existence" pattern as SESSION_NOT_FOUND elsewhere in this module.
+    const updated = await this.consultationModel
+      .findOneAndUpdate(
+        { _id: sessionId, owner: ownerObjectId, status: 'pending_payment' },
+        { $set: { status: 'cancelled', closedBy: 'system', closedAt: new Date() } },
+        { new: true },
+      )
+      .exec();
+
+    if (!updated) {
+      const owned = await this.consultationModel.findOne({ _id: sessionId, owner: ownerObjectId }).lean().exec();
+      if (!owned) throw new NotFoundException({ message: 'Session not found', code: 'SESSION_NOT_FOUND' });
+      throw new BadRequestException({
+        message: 'Only a session awaiting payment can be cancelled — once payment is submitted, this goes through the dispute flow instead',
+        code: 'INVALID_STATUS',
+      });
+    }
+
+    await this.postStatusMessage(updated, updated.thread as Types.ObjectId, 'user', 'cancelled', 'Consultation cancelled');
+
+    const [pet, vet, owner] = await Promise.all([
+      this.petModel.findById(updated.pet).select('name').lean().exec(),
+      this.vetModel.findById(updated.vet).lean().exec(),
+      this.userModel.findById(updated.owner).select('name').lean().exec(),
+    ]);
+    const clinic = vet?.clinicId ? await this.clinicModel.findById(vet.clinicId).lean().exec() : null;
+
+    return {
+      data: toConsultationSessionResponse(updated.toObject(), pet?.name ?? 'Pet', vet?.name ?? 'Vet', owner?.name ?? 'Owner', clinic),
+      message: 'Consultation cancelled',
     };
   }
 
@@ -190,15 +245,26 @@ export class ConsultationsService {
       throw new ForbiddenException({ message: 'You do not own this session', code: 'FORBIDDEN' });
     }
 
-    const [pet, vet] = await Promise.all([
+    const [pet, vet, owner] = await Promise.all([
       this.petModel.findById(session.pet).select('name').lean().exec(),
       this.vetModel.findById(session.vet).lean().exec(),
+      this.userModel.findById(session.owner).select('name').lean().exec(),
     ]);
+    const clinic = vet?.clinicId ? await this.clinicModel.findById(vet.clinicId).lean().exec() : null;
+    session.paymentProofUrl = await this.resolveProofUrl(session.paymentProofUrl);
 
     return {
-      data: toConsultationSessionResponse(session, pet?.name ?? 'Pet', vet?.name ?? 'Vet', vet),
+      data: toConsultationSessionResponse(session, pet?.name ?? 'Pet', vet?.name ?? 'Vet', owner?.name ?? 'Owner', clinic),
       message: 'Consultation retrieved',
     };
+  }
+
+  // paymentProofUrl stores a bare S3 key (private object) — resolve a fresh
+  // signed URL on every read rather than persisting one, since the proof may
+  // be viewed long after upload (e.g. vet reviewing days later).
+  private async resolveProofUrl(key: string | null): Promise<string | null> {
+    if (!key) return null;
+    return this.s3Service.getSignedReadUrl(key);
   }
 
   private async hydrateList(
@@ -208,24 +274,36 @@ export class ConsultationsService {
 
     const petIds = [...new Set(sessions.map((s) => (s.pet as Types.ObjectId).toString()))];
     const vetIds = [...new Set(sessions.map((s) => (s.vet as Types.ObjectId).toString()))];
+    const ownerIds = [...new Set(sessions.map((s) => (s.owner as Types.ObjectId).toString()))];
 
-    const [pets, vets] = await Promise.all([
+    const [pets, vets, owners] = await Promise.all([
       this.petModel.find({ _id: { $in: petIds } }).select('name').lean().exec(),
       this.vetModel.find({ _id: { $in: vetIds } }).lean().exec(),
+      this.userModel.find({ _id: { $in: ownerIds } }).select('name').lean().exec(),
     ]);
+
+    const clinicIds = [...new Set(vets.filter((v) => v.clinicId).map((v) => (v.clinicId as Types.ObjectId).toString()))];
+    const clinics = clinicIds.length
+      ? await this.clinicModel.find({ _id: { $in: clinicIds } }).lean().exec()
+      : [];
 
     const petNames = new Map(pets.map((p) => [(p._id as Types.ObjectId).toString(), p.name]));
     const vetMap = new Map(vets.map((v) => [(v._id as Types.ObjectId).toString(), v]));
+    const ownerNames = new Map(owners.map((o) => [(o._id as Types.ObjectId).toString(), o.name]));
+    const clinicMap = new Map(clinics.map((c) => [(c._id as Types.ObjectId).toString(), c]));
 
-    return sessions.map((s) => {
+    return Promise.all(sessions.map(async (s) => {
       const vet = vetMap.get((s.vet as Types.ObjectId).toString());
+      const clinic = vet?.clinicId ? clinicMap.get((vet.clinicId as Types.ObjectId).toString()) : null;
+      const paymentProofUrl = await this.resolveProofUrl(s.paymentProofUrl);
       return toConsultationSessionResponse(
-        s,
+        { ...s, paymentProofUrl },
         petNames.get((s.pet as Types.ObjectId).toString()) ?? 'Pet',
         vet?.name ?? 'Vet',
-        vet,
+        ownerNames.get((s.owner as Types.ObjectId).toString()) ?? 'Owner',
+        clinic,
       );
-    });
+    }));
   }
 
   private async postStatusMessage(

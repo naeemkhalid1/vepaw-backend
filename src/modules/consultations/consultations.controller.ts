@@ -39,6 +39,12 @@ export class ConsultationsController {
     return this.consultationsService.submitPayment(user.sub, id, proof);
   }
 
+  @Post(':id/cancel')
+  @ApiOperation({ summary: 'Cancel a consultation session — only while awaiting payment' })
+  cancel(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.consultationsService.cancelConsultation(user.sub, id);
+  }
+
   @Get()
   @ApiOperation({ summary: 'List own consultation sessions' })
   list(@CurrentUser() user: JwtPayload) {

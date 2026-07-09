@@ -22,6 +22,7 @@ import {
   VetResponse,
 } from '../../shared/types';
 import { ListVetsDto } from './dto/list-vets.dto';
+import { karachiDateStr, karachiTimeStr } from '../../shared/utils/karachi-time.util';
 import { NearbyVetsDto } from './dto/nearby-vets.dto';
 import { EmergencyVetsDto } from './dto/emergency-vets.dto';
 import { GetAvailabilityDto } from './dto/get-availability.dto';
@@ -203,11 +204,11 @@ export class VetsService {
       rawSlots = this.generateSlots(daySchedule.open, daySchedule.close, slotDuration);
     }
 
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = karachiDateStr();
     let slots = rawSlots;
     if (dto.date === todayStr) {
-      const now = new Date();
-      const nowMinutes = now.getHours() * 60 + now.getMinutes();
+      const [nowH, nowM] = karachiTimeStr().split(':').map(Number);
+      const nowMinutes = nowH * 60 + nowM;
       slots = rawSlots.filter((s) => {
         const [h, m] = s.split(':').map(Number);
         return h * 60 + m > nowMinutes;

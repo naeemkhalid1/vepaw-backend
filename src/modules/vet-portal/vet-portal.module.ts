@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { Vet, VetSchema } from '../../database/schemas/vet.schema';
+import { Clinic, ClinicSchema } from '../../database/schemas/clinic.schema';
 import { Appointment, AppointmentSchema } from '../../database/schemas/appointment.schema';
 import { Pet, PetSchema } from '../../database/schemas/pet.schema';
 import { User, UserSchema } from '../../database/schemas/user.schema';
@@ -44,6 +45,7 @@ import {
   imports: [
     MongooseModule.forFeature([
       { name: Vet.name, schema: VetSchema },
+      { name: Clinic.name, schema: ClinicSchema },
       { name: Appointment.name, schema: AppointmentSchema },
       { name: Pet.name, schema: PetSchema },
       { name: User.name, schema: UserSchema },

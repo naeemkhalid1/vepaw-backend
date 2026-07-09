@@ -4,12 +4,14 @@ import { StoreController } from './store.controller';
 import { StoreService } from './store.service';
 import { Product, ProductSchema } from '../../database/schemas/product.schema';
 import { Order, OrderSchema } from '../../database/schemas/order.schema';
+import { User, UserSchema } from '../../database/schemas/user.schema';
 
 @Module({
   imports: [
     MongooseModule.forFeature([
       { name: Product.name, schema: ProductSchema },
       { name: Order.name, schema: OrderSchema },
+      { name: User.name, schema: UserSchema },
     ]),
   ],
   controllers: [StoreController],

@@ -1,5 +1,7 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
+import { CONSULTATION_STATUSES } from './consultation-session.schema';
+import type { ConsultationStatus as ConsultationStatusValue } from './consultation-session.schema';
 
 @Schema({ _id: false })
 class ProductRecommendation {
@@ -68,10 +70,10 @@ class ConsultationStatus {
 
   @Prop({
     type: String,
-    enum: ['pending_payment', 'payment_submitted', 'active', 'closed', 'expired'],
+    enum: CONSULTATION_STATUSES,
     required: true,
   })
-  status: 'pending_payment' | 'payment_submitted' | 'active' | 'closed' | 'expired';
+  status: ConsultationStatusValue;
 }
 
 const ConsultationStatusSchema = SchemaFactory.createForClass(ConsultationStatus);

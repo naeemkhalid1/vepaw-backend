@@ -3,9 +3,9 @@ import { Type } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
 export class ListAppointmentsDto {
-  @ApiPropertyOptional({ enum: ['pending', 'confirmed', 'completed', 'cancelled', 'no-show'] })
+  @ApiPropertyOptional({ enum: ['pending', 'confirmed', 'in-progress', 'completed', 'cancelled', 'no-show'] })
   @IsOptional()
-  @IsIn(['pending', 'confirmed', 'completed', 'cancelled', 'no-show'])
+  @IsIn(['pending', 'confirmed', 'in-progress', 'completed', 'cancelled', 'no-show'])
   status?: string;
 
   @ApiPropertyOptional({ default: 1 })
