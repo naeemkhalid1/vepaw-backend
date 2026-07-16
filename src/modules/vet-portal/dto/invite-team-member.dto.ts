@@ -7,8 +7,8 @@ export class InviteTeamMemberDto {
   @IsNotEmpty()
   emailOrPhone: string;
 
-  @ApiProperty({ enum: ['team_vet', 'accountant'] })
+  @ApiProperty({ enum: ['team_vet', 'manager'] })
   @IsString()
-  @IsIn(['team_vet', 'accountant'])
-  role: 'team_vet' | 'accountant';
+  @IsIn(['team_vet', 'manager'])
+  role: 'team_vet' | 'manager';
 }

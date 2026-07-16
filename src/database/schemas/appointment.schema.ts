@@ -25,11 +25,18 @@ export class Appointment {
 
   @Prop({
     type: String,
-    enum: ['pending', 'confirmed', 'in-progress', 'completed', 'cancelled', 'no-show'],
+    enum: ['pending', 'confirmed', 'in-progress', 'completed', 'cancelled', 'no-show', 'disputed'],
     default: 'pending',
     index: true,
   })
-  status: 'pending' | 'confirmed' | 'in-progress' | 'completed' | 'cancelled' | 'no-show';
+  status:
+    | 'pending'
+    | 'confirmed'
+    | 'in-progress'
+    | 'completed'
+    | 'cancelled'
+    | 'no-show'
+    | 'disputed';
 
   @Prop({ required: true, min: 0 })
   fee: number;
@@ -42,35 +49,43 @@ export class Appointment {
 
   @Prop({
     type: String,
-    enum: ['jazzcash', 'easypaisa', 'cod'],
+    enum: ['safepay', 'cod'],
     required: true,
   })
-  paymentMethod: 'jazzcash' | 'easypaisa' | 'cod';
+  paymentMethod: 'safepay' | 'cod';
 
   @Prop({
     type: String,
-    enum: ['pending', 'proof_submitted', 'held', 'released', 'refunded'],
+    enum: ['pending', 'held', 'released', 'refunded'],
     default: 'pending',
   })
-  paymentStatus: 'pending' | 'proof_submitted' | 'held' | 'released' | 'refunded';
+  paymentStatus: 'pending' | 'held' | 'released' | 'refunded';
 
+  // Safepay tracker token for 'safepay' appointments — the webhook matches on this to
+  // apply payment.succeeded/payment.failed events. Null for 'cod'.
   @Prop({ type: String, default: null })
   paymentReference: string | null;
-
-  // Bare S3 key of the uploaded proof screenshot (private object) — a fresh signed URL is
-  // resolved on every read rather than persisted, since the proof may be viewed long after
-  // upload. Not applicable to 'cod' appointments.
-  @Prop({ type: String, default: null })
-  paymentProofUrl: string | null;
-
-  @Prop({ type: Date, default: null })
-  paymentSubmittedAt: Date | null;
 
   @Prop({ type: String, default: null })
   notes: string | null;
 
   @Prop({ type: Types.ObjectId, ref: 'Review', default: null })
   reviewId: Types.ObjectId | null;
+
+  // When a completed safepay appointment's held payout becomes eligible for auto-release —
+  // gives the owner a short window to dispute before the vet's payout is finalized, instead
+  // of releasing the instant the vet marks it complete.
+  @Prop({ type: Date, default: null })
+  payoutEligibleAt: Date | null;
+
+  @Prop({ type: String, default: null })
+  disputeReason: string | null;
+
+  @Prop({ type: Types.ObjectId, ref: 'User', default: null })
+  adminResolvedBy: Types.ObjectId | null;
+
+  @Prop({ type: Date, default: null })
+  adminResolvedAt: Date | null;
 
   @Prop({
     type: {

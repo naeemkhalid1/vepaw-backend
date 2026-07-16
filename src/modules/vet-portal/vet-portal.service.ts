@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -12,6 +13,10 @@ import { randomBytes } from 'crypto';
 import { Vet, VetDocument } from '../../database/schemas/vet.schema';
 import { Clinic, ClinicDocument } from '../../database/schemas/clinic.schema';
 import { Appointment, AppointmentDocument } from '../../database/schemas/appointment.schema';
+import {
+  AppointmentReservation,
+  AppointmentReservationDocument,
+} from '../../database/schemas/appointment-reservation.schema';
 import { Pet, PetDocument } from '../../database/schemas/pet.schema';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { Review, ReviewDocument } from '../../database/schemas/review.schema';
@@ -33,7 +38,6 @@ import {
 import { toClinicDispenseResponse } from '../../shared/mappers/clinic-request.mapper';
 import { toConsultationSessionResponse } from '../../shared/mappers/consultation.mapper';
 import { ChatGateway } from '../realtime/gateways/chat.gateway';
-import { S3Service } from '../../common/storage/s3.service';
 import {
   ServiceResponse,
   MessageResponse,
@@ -53,6 +57,10 @@ import { BlockDayDto } from './dto/block-day.dto';
 import { SubmitOnboardingDto } from './dto/submit-onboarding.dto';
 import { AcceptVetInviteDto } from './dto/accept-vet-invite.dto';
 import { karachiDateStr, karachiTimeStr, karachiStartOfMonth, karachiDateTimeToUTC } from '../../shared/utils/karachi-time.util';
+import {
+  isValidAppointmentTransition,
+  PAYOUT_HOLD_MS,
+} from '../../shared/utils/appointment-transitions.util';
 
 const AVATAR_COLORS = ['#6366F1', '#F59E0B', '#10B981', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6', '#F97316'];
 const CATEGORY_COLORS: Record<string, { icon: string; bg: string }> = {
@@ -93,6 +101,19 @@ function petAge(dob: string): string {
   return `${Math.max(1, months)}mo`;
 }
 
+// Held-but-not-yet-eligible payouts show a countdown so the vet can tell them apart from money
+// that's actually available — rounds up so "in Xh" never overstates how soon it lands.
+function toPayoutLabel(
+  paymentStatus: string,
+  payoutEligibleAt: Date | null | undefined,
+): string | null {
+  if (paymentStatus !== 'held' || !payoutEligibleAt) return null;
+  const msRemaining = payoutEligibleAt.getTime() - Date.now();
+  if (msRemaining <= 0) return null;
+  const hours = Math.ceil(msRemaining / (60 * 60 * 1000));
+  return `Releases in ${hours}h`;
+}
+
 function getCategoryLabel(cat: string): string {
   return cat.charAt(0).toUpperCase() + cat.slice(1);
 }
@@ -104,6 +125,8 @@ export class VetPortalService {
   constructor(
     @InjectModel(Vet.name) private readonly vetModel: Model<VetDocument>,
     @InjectModel(Appointment.name) private readonly appointmentModel: Model<AppointmentDocument>,
+    @InjectModel(AppointmentReservation.name)
+    private readonly reservationModel: Model<AppointmentReservationDocument>,
     @InjectModel(Pet.name) private readonly petModel: Model<PetDocument>,
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     @InjectModel(Review.name) private readonly reviewModel: Model<ReviewDocument>,
@@ -122,7 +145,6 @@ export class VetPortalService {
     @InjectModel(ConsultationSession.name)
     private readonly consultationModel: Model<ConsultationSessionDocument>,
     private readonly chatGateway: ChatGateway,
-    private readonly s3Service: S3Service,
   ) {}
 
   // ─── Schedule ──────────────────────────────────────────
@@ -141,7 +163,15 @@ export class VetPortalService {
     const confirmed = todayAppts.filter((a) => a.status === 'confirmed' || a.status === 'in-progress').length;
     const pending = todayAppts.filter((a) => a.status === 'pending').length;
     const pendingEarnings = todayAppts.filter((a) => a.status !== 'cancelled').reduce((s, a) => s + a.vetPayout, 0);
-    const monthTotal = monthAppts.length;
+    const upcomingReleases = todayAppts
+      .filter((a) => a.paymentStatus === 'held' && a.payoutEligibleAt && a.payoutEligibleAt.getTime() > Date.now())
+      .map((a) => (a.payoutEligibleAt as Date).getTime());
+    const pendingEarningsNote =
+      upcomingReleases.length > 0
+        ? `Next release in ${Math.ceil((Math.min(...upcomingReleases) - Date.now()) / (60 * 60 * 1000))}h`
+        : null;
+    const monthBookings = monthAppts.length;
+    const monthTotal = monthAppts.reduce((s, a) => s + a.fee, 0);
 
     const ownerIds = [...new Set(monthAppts.map((a) => a.owner.toString()))];
     const repeatOwners = ownerIds.filter((oid) => monthAppts.filter((a) => a.owner.toString() === oid).length > 1);
@@ -153,7 +183,10 @@ export class VetPortalService {
         upcomingCount: pending,
         pendingEarnings,
         pendingEarningsLabel: `PKR ${pendingEarnings.toLocaleString()}`,
+        pendingEarningsNote,
         thisMonth: monthTotal,
+        thisMonthLabel: `PKR ${monthTotal.toLocaleString()}`,
+        thisMonthBookings: monthBookings,
         thisMonthCommission: `PKR ${monthAppts.reduce((s, a) => s + a.platformCommission, 0).toLocaleString()} commission`,
         repeatClients: ownerIds.length > 0 ? `${Math.round((repeatOwners.length / ownerIds.length) * 100)}%` : '0%',
         repeatClientsSubtitle: 'returning this month',
@@ -180,7 +213,7 @@ export class VetPortalService {
       .lean()
       .exec();
 
-    const mapped = await Promise.all(appts.map(async (a) => ({
+    const mapped = appts.map((a) => ({
       id: a._id.toString(),
       patientId: a.pet.toString(),
       date: a.date,
@@ -193,16 +226,17 @@ export class VetPortalService {
       status: this.toScheduleStatus(a.status),
       paymentMethod: a.paymentMethod,
       paymentStatus: a.paymentStatus,
-      paymentProofUrl: a.paymentProofUrl ? await this.s3Service.getSignedReadUrl(a.paymentProofUrl) : null,
-      paymentSubmittedAt: a.paymentSubmittedAt,
-    })));
+      payoutLabel: toPayoutLabel(a.paymentStatus, a.payoutEligibleAt),
+    }));
 
     return { data: mapped, message: 'Appointments retrieved' };
   }
 
-  // Maps the DB status enum ('pending'|'confirmed'|'in-progress'|'completed'|'cancelled'|'no-show') to the
+  // Maps the DB status enum ('pending'|'confirmed'|'in-progress'|'completed'|'cancelled'|'no-show'|'disputed') to the
   // camelCase vocabulary POST /vet/schedule/appointments/:id/status accepts, so GET and POST agree.
-  private toScheduleStatus(status: 'pending' | 'confirmed' | 'in-progress' | 'completed' | 'cancelled' | 'no-show'): string {
+  private toScheduleStatus(
+    status: 'pending' | 'confirmed' | 'in-progress' | 'completed' | 'cancelled' | 'no-show' | 'disputed',
+  ): string {
     if (status === 'in-progress') return 'inProgress';
     if (status === 'completed') return 'done';
     if (status === 'no-show') return 'noShow';
@@ -573,9 +607,9 @@ export class VetPortalService {
 
   // ─── Team ──────────────────────────────────────────────
 
-  private staffRoleLabel(staffRole: 'admin_vet' | 'team_vet' | 'accountant' | null): string {
+  private staffRoleLabel(staffRole: 'admin_vet' | 'team_vet' | 'manager' | null): string {
     if (staffRole === 'team_vet') return 'Veterinarian';
-    if (staffRole === 'accountant') return 'Accountant';
+    if (staffRole === 'manager') return 'Manager';
     return 'Admin / Veterinarian'; // 'admin_vet' or legacy solo vet (null)
   }
 
@@ -626,7 +660,7 @@ export class VetPortalService {
       .exec();
 
     for (const inv of invites) {
-      const inviteRole = inv.role === 'accountant' ? 'accountant' : 'team_vet';
+      const inviteRole = inv.role === 'manager' ? 'manager' : 'team_vet';
       members.push({
         id: inv._id.toString(),
         name: inv.inviteeName,
@@ -652,14 +686,14 @@ export class VetPortalService {
       this.inviteModel.countDocuments({ entityId: adminVetId, entityType: 'vet', status: 'pending' }),
     ]);
 
-    const veterinarians = clinicVets.filter((v) => v.staffRole !== 'accountant').length;
-    const accountants = clinicVets.filter((v) => v.staffRole === 'accountant').length;
+    const veterinarians = clinicVets.filter((v) => v.staffRole !== 'manager').length;
+    const managerCount = clinicVets.filter((v) => v.staffRole === 'manager').length;
 
     return {
       data: {
         veterinarians,
         vetSubtitle: 'practicing',
-        admins: accountants,
+        managers: managerCount,
         adminSubtitle: 'clinic staff',
         pendingInvites: invites,
         pendingSubtitle: 'awaiting response',
@@ -845,9 +879,9 @@ export class VetPortalService {
     const vet = await this.vetModel.findById(vetId).exec();
     if (!vet) throw new NotFoundException('Vet not found');
 
-    if (dto.payout && user.staffRole && !['admin_vet', 'accountant'].includes(user.staffRole)) {
+    if (dto.payout && user.staffRole && !['admin_vet', 'manager'].includes(user.staffRole)) {
       throw new ForbiddenException({
-        message: 'Only the clinic admin or accountant can update payout details',
+        message: 'Only the clinic admin or manager can update payout details',
         code: 'FORBIDDEN',
       });
     }
@@ -945,11 +979,27 @@ export class VetPortalService {
     });
 
     const activeDay = dateParam ?? weekDays.find((d) => d.isActive)?.fullDate ?? todayStr;
-    const todayAppts = await this.appointmentModel
-      .find({ vet: new Types.ObjectId(vetId), date: activeDay })
-      .lean()
-      .exec();
-    const bookedSlots = new Set(todayAppts.map((a) => a.timeSlot));
+    const [todayAppts, activeReservations] = await Promise.all([
+      this.appointmentModel
+        .find({ vet: new Types.ObjectId(vetId), date: activeDay })
+        .lean()
+        .exec(),
+      // Safepay reservations mid-checkout soft-lock a slot too, even though no real
+      // Appointment exists yet — otherwise the vet's grid would show it as free.
+      this.reservationModel
+        .find({
+          vet: new Types.ObjectId(vetId),
+          date: activeDay,
+          expiresAt: { $gt: new Date() },
+        })
+        .select('timeSlot')
+        .lean()
+        .exec(),
+    ]);
+    const bookedSlots = new Set([
+      ...todayAppts.map((a) => a.timeSlot),
+      ...activeReservations.map((r) => r.timeSlot),
+    ]);
 
     const weekStart = new Date(startOfWeekUTC).toISOString().slice(0, 10);
     const weekEnd = new Date(endOfWeekUTC).toISOString().slice(0, 10);
@@ -1289,7 +1339,7 @@ export class VetPortalService {
       applicationStatus: 'approved',
       subscriptionStatus: inviter.subscriptionStatus,
       clinicId: inviter.clinicId,
-      staffRole: invite.role as 'team_vet' | 'accountant',
+      staffRole: invite.role as 'team_vet' | 'manager',
     });
 
     invite.status = 'accepted';
@@ -1313,12 +1363,55 @@ export class VetPortalService {
       throw new BadRequestException({ message: 'Invalid appointment status', code: 'INVALID_STATUS' });
     }
 
-    const appt = await this.appointmentModel.findOneAndUpdate(
-      { _id: new Types.ObjectId(appointmentId), vet: new Types.ObjectId(vetId) },
-      { status: mappedStatus },
-      { runValidators: true },
-    ).exec();
+    const appt = await this.appointmentModel
+      .findOne({
+        _id: new Types.ObjectId(appointmentId),
+        vet: new Types.ObjectId(vetId),
+      })
+      .exec();
     if (!appt) throw new NotFoundException('Appointment not found');
+
+    if (!isValidAppointmentTransition(appt.status, mappedStatus)) {
+      throw new UnprocessableEntityException({
+        message: `Cannot move an appointment from '${appt.status}' to '${mappedStatus}'`,
+        code: 'INVALID_STATUS_TRANSITION',
+      });
+    }
+
+    // A vet can't manually confirm a safepay appointment ahead of the Safepay webhook —
+    // confirmation must follow real payment, not the other way around. COD has no payment to
+    // wait for, so it's unaffected.
+    if (
+      mappedStatus === 'confirmed' &&
+      appt.paymentMethod === 'safepay' &&
+      appt.paymentStatus !== 'held'
+    ) {
+      throw new UnprocessableEntityException({
+        message: 'Cannot confirm — payment has not been received yet',
+        code: 'PAYMENT_NOT_RECEIVED',
+      });
+    }
+
+    appt.status = mappedStatus;
+    // Cancellation always releases a held payment, regardless of which side (owner or vet)
+    // initiated it — the money's fate follows the booking's fate, not the actor. Mirrors the
+    // owner-side cancelAppointment behavior in appointments.service.ts.
+    if (mappedStatus === 'cancelled' && appt.paymentStatus === 'held') {
+      appt.paymentStatus = 'refunded';
+    }
+    // Mirrors completeAppointment() in appointments.service.ts — this is the second vet-facing
+    // "mark complete" path and must apply the same payout-hold window, or a safepay appointment
+    // completed through this path would release instantly while the other path holds for
+    // PAYOUT_HOLD_MS, reopening the exact drift this state machine was built to prevent.
+    if (mappedStatus === 'completed' && appt.paymentStatus === 'held') {
+      if (appt.paymentMethod === 'safepay') {
+        appt.payoutEligibleAt = new Date(Date.now() + PAYOUT_HOLD_MS);
+      } else {
+        appt.paymentStatus = 'released';
+      }
+    }
+    await appt.save();
+
     return { data: null, message: `Appointment ${status}` };
   }
 
@@ -1687,18 +1780,17 @@ export class VetPortalService {
       : [];
     const clinicMap = new Map(clinics.map((c) => [(c._id as Types.ObjectId).toString(), c]));
 
-    const data = await Promise.all(sessions.map(async (s) => {
+    const data = sessions.map((s) => {
       const sessionVet = vetMap.get((s.vet as Types.ObjectId).toString());
       const clinic = sessionVet?.clinicId ? clinicMap.get((sessionVet.clinicId as Types.ObjectId).toString()) : null;
-      const paymentProofUrl = s.paymentProofUrl ? await this.s3Service.getSignedReadUrl(s.paymentProofUrl) : null;
       return toConsultationSessionResponse(
-        { ...s, paymentProofUrl },
+        s,
         petNames.get((s.pet as Types.ObjectId).toString()) ?? 'Pet',
         sessionVet?.name ?? 'Vet',
         ownerNames.get((s.owner as Types.ObjectId).toString()) ?? 'Owner',
         clinic,
       );
-    }));
+    });
 
     return { data, message: 'Consultations retrieved' };
   }
@@ -1785,11 +1877,13 @@ export class VetPortalService {
     });
   }
 
+  // Manual fallback for when the Safepay webhook never arrives — the vet checks their own
+  // account/Safepay dashboard, confirms the payment actually landed, and pushes it through by hand.
   async markConsultationPaid(user: JwtPayload, sessionId: string): Promise<ServiceResponse<null>> {
     const now = new Date();
 
     const updated = await this.consultationModel.findOneAndUpdate(
-      { ...this.consultationOwnershipFilter(user, sessionId), status: 'payment_submitted' },
+      { ...this.consultationOwnershipFilter(user, sessionId), status: 'pending_payment' },
       {
         $set: {
           status: 'active',
@@ -1807,8 +1901,8 @@ export class VetPortalService {
       return this.explainFailedConsultationTransition(
         user,
         sessionId,
-        'payment_submitted',
-        'Session must have a submitted payment proof to be verified',
+        'pending_payment',
+        'Session must be awaiting payment to be manually marked as paid',
       );
     }
 
@@ -1817,9 +1911,11 @@ export class VetPortalService {
     return { data: null, message: 'Consultation activated' };
   }
 
+  // Flags an already-paid, active session for admin review (e.g. suspected fraud/chargeback) —
+  // not a dispute over whether payment happened, since Safepay's webhook already confirmed that.
   async disputeConsultation(user: JwtPayload, sessionId: string, reason: string): Promise<ServiceResponse<null>> {
     const updated = await this.consultationModel.findOneAndUpdate(
-      { ...this.consultationOwnershipFilter(user, sessionId), status: 'payment_submitted' },
+      { ...this.consultationOwnershipFilter(user, sessionId), status: 'active' },
       {
         $set: {
           status: 'disputed',
@@ -1835,8 +1931,8 @@ export class VetPortalService {
       return this.explainFailedConsultationTransition(
         user,
         sessionId,
-        'payment_submitted',
-        'Only a submitted payment can be disputed',
+        'active',
+        'Only an active consultation can be disputed',
       );
     }
 

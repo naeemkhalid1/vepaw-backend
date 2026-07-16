@@ -1,5 +1,4 @@
 import {
-  IsIn,
   IsMongoId,
   IsNotEmpty,
   IsNumber,
@@ -8,7 +7,7 @@ import {
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
-export class CreateAppointmentDto {
+export class CreateAppointmentReservationDto {
   @ApiProperty({ example: '64a3f2c1b5d6e7f8a9b0c1d2' })
   @IsMongoId()
   vetId: string;
@@ -26,13 +25,6 @@ export class CreateAppointmentDto {
   @Matches(/^\d{2}:\d{2}$/, { message: 'timeSlot must be HH:MM' })
   @IsNotEmpty()
   timeSlot: string;
-
-  // Safepay bookings go through POST /appointments/reservations instead — this endpoint only
-  // ever creates a real Appointment immediately, which is only appropriate for COD (no payment
-  // to wait for, so no abandoned-booking risk to protect against).
-  @ApiProperty({ enum: ['cod'] })
-  @IsIn(['cod'])
-  paymentMethod: 'cod';
 
   @ApiProperty({
     example: 1500,

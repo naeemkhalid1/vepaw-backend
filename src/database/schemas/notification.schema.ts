@@ -1,16 +1,30 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
 
-export type NotificationDocument = HydratedDocument<Notification> & { createdAt: Date };
+export type NotificationDocument = HydratedDocument<Notification> & {
+  createdAt: Date;
+};
 
 @Schema({ timestamps: true })
 export class Notification {
   @Prop({ type: Types.ObjectId, ref: 'User', required: true, index: true })
   user: Types.ObjectId;
 
+  // Distinguishes a User recipient from a Vet recipient — vets are a separate, self-authenticating
+  // collection with no User document, so `user` alone can't tell which collection it points into.
+  @Prop({ type: String, enum: ['user', 'vet'], default: 'user' })
+  recipientType: 'user' | 'vet';
+
   @Prop({
     required: true,
-    enum: ['vaccination', 'order_delivery', 'order_delivered', 'message', 'booking', 'rating'],
+    enum: [
+      'vaccination',
+      'order_delivery',
+      'order_delivered',
+      'message',
+      'booking',
+      'rating',
+    ],
   })
   type: string;
 

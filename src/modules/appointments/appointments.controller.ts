@@ -8,18 +8,16 @@ import {
   Patch,
   Post,
   Query,
-  UploadedFile,
-  UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
-import { ApiBearerAuth, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AppointmentsService } from './appointments.service';
 import { CreateAppointmentDto } from './dto/create-appointment.dto';
+import { CreateAppointmentReservationDto } from './dto/create-appointment-reservation.dto';
 import { ListAppointmentsDto } from './dto/list-appointments.dto';
 import { SubmitReviewDto } from './dto/submit-review.dto';
+import { DisputeAppointmentDto } from './dto/dispute-appointment.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
-import { imageUploadOptions } from '../../common/storage/image-upload.options';
 import type { JwtPayload } from '../../shared/types';
 
 @ApiTags('appointments')
@@ -29,9 +27,21 @@ export class AppointmentsController {
   constructor(private readonly appointmentsService: AppointmentsService) {}
 
   @Post()
-  @ApiOperation({ summary: 'Create appointment — validates fee and locks slot immediately' })
+  @ApiOperation({ summary: 'Create a COD appointment — validates fee and locks slot immediately' })
   createAppointment(@CurrentUser() user: JwtPayload, @Body() dto: CreateAppointmentDto) {
     return this.appointmentsService.createAppointment(user.sub, dto);
+  }
+
+  @Post('reservations')
+  @ApiOperation({
+    summary:
+      'Reserve a slot for a safepay appointment ahead of checkout — no real appointment exists until payment is confirmed',
+  })
+  createReservation(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: CreateAppointmentReservationDto,
+  ) {
+    return this.appointmentsService.createReservation(user.sub, dto);
   }
 
   @Get()
@@ -44,26 +54,6 @@ export class AppointmentsController {
   @ApiOperation({ summary: 'Get appointment detail' })
   getAppointment(@CurrentUser() user: JwtPayload, @Param('id') appointmentId: string) {
     return this.appointmentsService.getAppointment(user.sub, appointmentId);
-  }
-
-  @Post(':id/submit-payment')
-  @UseInterceptors(FileInterceptor('proof', imageUploadOptions))
-  @ApiConsumes('multipart/form-data')
-  @ApiOperation({ summary: 'Upload payment proof screenshot for a pending (non-cod) appointment' })
-  submitPayment(
-    @CurrentUser() user: JwtPayload,
-    @Param('id') appointmentId: string,
-    @UploadedFile() proof: Express.Multer.File,
-  ) {
-    return this.appointmentsService.submitPayment(user.sub, appointmentId, proof);
-  }
-
-  @Post(':id/verify-payment')
-  @HttpCode(HttpStatus.OK)
-  @Roles('vet')
-  @ApiOperation({ summary: 'Verify submitted payment proof and confirm the appointment (vet side)' })
-  verifyPayment(@CurrentUser() user: JwtPayload, @Param('id') appointmentId: string) {
-    return this.appointmentsService.verifyAppointmentPayment(user.sub, appointmentId);
   }
 
   @Patch(':id/complete')
@@ -96,5 +86,23 @@ export class AppointmentsController {
     @Body() dto: SubmitReviewDto,
   ) {
     return this.appointmentsService.submitReview(user.sub, appointmentId, dto);
+  }
+
+  @Post(':id/dispute')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Dispute a completed appointment before its held payout auto-releases to the vet',
+  })
+  disputeAppointment(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') appointmentId: string,
+    @Body() dto: DisputeAppointmentDto,
+  ) {
+    return this.appointmentsService.disputeAppointment(
+      user.sub,
+      appointmentId,
+      dto.reason,
+    );
   }
 }

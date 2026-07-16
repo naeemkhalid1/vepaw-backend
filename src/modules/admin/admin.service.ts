@@ -629,6 +629,44 @@ export class AdminService {
     return { data: null, message: `Disputed consultation ${outcome === 'approve' ? 'approved' : 'rejected'}` };
   }
 
+  async resolveDisputedAppointment(
+    appointmentId: string,
+    adminId: string,
+    outcome: 'release' | 'refund',
+  ): Promise<ServiceResponse<null>> {
+    const now = new Date();
+
+    const updated = await this.appointmentModel
+      .findOneAndUpdate(
+        { _id: new Types.ObjectId(appointmentId), status: 'disputed' },
+        {
+          $set: {
+            paymentStatus: outcome === 'release' ? 'released' : 'refunded',
+            adminResolvedBy: new Types.ObjectId(adminId),
+            adminResolvedAt: now,
+          },
+        },
+        { new: true },
+      )
+      .exec();
+
+    if (!updated) {
+      const exists = await this.appointmentModel.findById(appointmentId).lean().exec();
+      if (!exists) {
+        throw new NotFoundException({ message: 'Appointment not found', code: 'APPOINTMENT_NOT_FOUND' });
+      }
+      throw new BadRequestException({
+        message: 'This appointment is not currently disputed — it may have already been resolved',
+        code: 'INVALID_STATUS',
+      });
+    }
+
+    return {
+      data: null,
+      message: `Disputed appointment ${outcome === 'release' ? 'payout released' : 'refunded'}`,
+    };
+  }
+
   private async postConsultationStatusMessage(
     session: ConsultationSessionDocument,
     status: ConsultationSessionDocument['status'],

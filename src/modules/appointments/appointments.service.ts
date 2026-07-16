@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   ConflictException,
   ForbiddenException,
   HttpException,
@@ -9,28 +8,62 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
-import { Appointment, AppointmentDocument } from '../../database/schemas/appointment.schema';
+import {
+  Appointment,
+  AppointmentDocument,
+} from '../../database/schemas/appointment.schema';
+import {
+  AppointmentReservation,
+  AppointmentReservationDocument,
+} from '../../database/schemas/appointment-reservation.schema';
 import { Review, ReviewDocument } from '../../database/schemas/review.schema';
 import { Vet, VetDocument } from '../../database/schemas/vet.schema';
 import { Pet, PetDocument } from '../../database/schemas/pet.schema';
 import { Clinic, ClinicDocument } from '../../database/schemas/clinic.schema';
 import { toAppointmentResponse } from '../../shared/mappers/appointment.mapper';
+import { toAppointmentReservationResponse } from '../../shared/mappers/appointment-reservation.mapper';
 import { toReviewResponse, ReviewRaw } from '../../shared/mappers/vet.mapper';
-import { AppointmentResponse, ReviewResponse, ServiceResponse } from '../../shared/types';
+import {
+  AppointmentResponse,
+  AppointmentReservationResponse,
+  ReviewResponse,
+  ServiceResponse,
+} from '../../shared/types';
 import { CreateAppointmentDto } from './dto/create-appointment.dto';
+import { CreateAppointmentReservationDto } from './dto/create-appointment-reservation.dto';
 import { ListAppointmentsDto } from './dto/list-appointments.dto';
 import { SubmitReviewDto } from './dto/submit-review.dto';
-import { karachiDateStr, karachiDateTimeToUTC } from '../../shared/utils/karachi-time.util';
-import { S3Service } from '../../common/storage/s3.service';
+import {
+  karachiDateStr,
+  karachiDateTimeToUTC,
+} from '../../shared/utils/karachi-time.util';
+import {
+  isValidAppointmentTransition,
+  PAYOUT_HOLD_MS,
+} from '../../shared/utils/appointment-transitions.util';
+import {
+  SafepayWebhookEvent,
+  extractTrackerToken,
+  extractOrderId,
+  extractAmount,
+} from '../../common/payments/safepay-webhook-event.interface';
+import { ClinicTeamService } from '../../common/vets/clinic-team.service';
+import { SafepayService } from '../../common/payments/safepay.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 // Configurable platform commission — move to ConfigService when fee tiers are introduced
 const PLATFORM_COMMISSION_PKR = 150;
 
 // How long past the scheduled time an unresolved appointment is treated as a no-show
 const NO_SHOW_GRACE_MS = 2 * 60 * 60 * 1000;
+
+// How long a safepay reservation soft-locks a slot before it's abandoned — auto-expires via
+// the AppointmentReservation schema's TTL index, no cleanup job needed.
+const RESERVATION_TTL_MINUTES = 15;
 
 @Injectable()
 export class AppointmentsService {
@@ -39,11 +72,18 @@ export class AppointmentsService {
   constructor(
     @InjectModel(Appointment.name)
     private readonly appointmentModel: Model<AppointmentDocument>,
-    @InjectModel(Review.name) private readonly reviewModel: Model<ReviewDocument>,
+    @InjectModel(AppointmentReservation.name)
+    private readonly reservationModel: Model<AppointmentReservationDocument>,
+    @InjectModel(Review.name)
+    private readonly reviewModel: Model<ReviewDocument>,
     @InjectModel(Vet.name) private readonly vetModel: Model<VetDocument>,
     @InjectModel(Pet.name) private readonly petModel: Model<PetDocument>,
-    @InjectModel(Clinic.name) private readonly clinicModel: Model<ClinicDocument>,
-    private readonly s3Service: S3Service,
+    @InjectModel(Clinic.name)
+    private readonly clinicModel: Model<ClinicDocument>,
+    private readonly clinicTeamService: ClinicTeamService,
+    private readonly notificationsService: NotificationsService,
+    private readonly safepayService: SafepayService,
+    private readonly config: ConfigService,
   ) {}
 
   @Cron(CronExpression.EVERY_HOUR)
@@ -62,7 +102,11 @@ export class AppointmentsService {
       .exec();
 
     const staleTodayIds = todaysAppointments
-      .filter((a) => karachiDateTimeToUTC(a.date, a.timeSlot).getTime() < now.getTime() - NO_SHOW_GRACE_MS)
+      .filter(
+        (a) =>
+          karachiDateTimeToUTC(a.date, a.timeSlot).getTime() <
+          now.getTime() - NO_SHOW_GRACE_MS,
+      )
       .map((a) => a._id);
 
     if (staleTodayIds.length > 0) {
@@ -78,16 +122,46 @@ export class AppointmentsService {
     }
   }
 
+  // Appointments the owner disputed have status 'disputed', not 'completed' — excluded here
+  // automatically, left for admin resolution (resolveDisputedAppointment) instead.
+  @Cron(CronExpression.EVERY_HOUR)
+  async releaseEligiblePayouts(): Promise<void> {
+    const result = await this.appointmentModel.updateMany(
+      {
+        status: 'completed',
+        paymentStatus: 'held',
+        payoutEligibleAt: { $lte: new Date() },
+      },
+      { $set: { paymentStatus: 'released' } },
+    );
+
+    if (result.modifiedCount > 0) {
+      this.logger.log(
+        `Released ${result.modifiedCount} eligible appointment payout(s)`,
+      );
+    }
+  }
+
   async createAppointment(
     userId: string,
     dto: CreateAppointmentDto,
   ): Promise<ServiceResponse<AppointmentResponse>> {
-    if (!Types.ObjectId.isValid(dto.vetId) || !Types.ObjectId.isValid(dto.petId)) {
-      throw new NotFoundException({ message: 'Vet or pet not found', code: 'NOT_FOUND' });
+    if (
+      !Types.ObjectId.isValid(dto.vetId) ||
+      !Types.ObjectId.isValid(dto.petId)
+    ) {
+      throw new NotFoundException({
+        message: 'Vet or pet not found',
+        code: 'NOT_FOUND',
+      });
     }
 
     const [vet, pet] = await Promise.all([
-      this.vetModel.findOne({ _id: dto.vetId, verified: true, subscriptionStatus: 'active' }),
+      this.vetModel.findOne({
+        _id: dto.vetId,
+        verified: true,
+        subscriptionStatus: 'active',
+      }),
       this.petModel.findOne({
         _id: dto.petId,
         owner: new Types.ObjectId(userId),
@@ -96,10 +170,16 @@ export class AppointmentsService {
     ]);
 
     if (!vet) {
-      throw new NotFoundException({ message: 'Vet not found', code: 'VET_NOT_FOUND' });
+      throw new NotFoundException({
+        message: 'Vet not found',
+        code: 'VET_NOT_FOUND',
+      });
     }
     if (!pet) {
-      throw new NotFoundException({ message: 'Pet not found', code: 'PET_NOT_FOUND' });
+      throw new NotFoundException({
+        message: 'Pet not found',
+        code: 'PET_NOT_FOUND',
+      });
     }
 
     if (dto.fee < vet.fee.min || dto.fee > vet.fee.max) {
@@ -112,14 +192,22 @@ export class AppointmentsService {
       );
     }
 
-    const slotTaken = await this.appointmentModel.exists({
-      vet: dto.vetId,
-      date: dto.date,
-      timeSlot: dto.timeSlot,
-      status: { $in: ['pending', 'confirmed'] },
-    });
+    const [slotTaken, slotReserved] = await Promise.all([
+      this.appointmentModel.exists({
+        vet: new Types.ObjectId(dto.vetId),
+        date: dto.date,
+        timeSlot: dto.timeSlot,
+        status: { $in: ['pending', 'confirmed'] },
+      }),
+      this.reservationModel.exists({
+        vet: new Types.ObjectId(dto.vetId),
+        date: dto.date,
+        timeSlot: dto.timeSlot,
+        expiresAt: { $gt: new Date() },
+      }),
+    ]);
 
-    if (slotTaken) {
+    if (slotTaken || slotReserved) {
       throw new UnprocessableEntityException({
         message: 'This time slot is no longer available',
         code: 'SLOT_UNAVAILABLE',
@@ -152,48 +240,258 @@ export class AppointmentsService {
       },
     });
 
-    return { data: await this.toResponse(appointment), message: 'Appointment created' };
+    return {
+      data: await this.toResponse(appointment),
+      message: 'Appointment created',
+    };
   }
 
-  async submitPayment(
+  // Safepay-only: soft-locks a slot for RESERVATION_TTL_MINUTES while checkout is in progress,
+  // without creating a real Appointment the vet would see. Promoted into a real Appointment on
+  // payment.succeeded, or left to expire (via the schema's TTL index — no cleanup job needed)
+  // if the user abandons checkout. See PENDING_FEATURES.md-style context: this exists so
+  // abandoned/unpaid bookings never clutter the vet's appointment list.
+  async createReservation(
     userId: string,
-    appointmentId: string,
-    proof: Express.Multer.File,
-  ): Promise<ServiceResponse<AppointmentResponse>> {
-    if (!Types.ObjectId.isValid(appointmentId)) {
-      throw new NotFoundException({ message: 'Appointment not found', code: 'APPOINTMENT_NOT_FOUND' });
-    }
-
-    // Ownership-scoped lookup collapses "doesn't exist" and "not yours" into one 404,
-    // mirroring /consultations/:id/submit-payment's contract rather than this file's
-    // findOwnedAppointment (404-vs-403 split) used elsewhere.
-    const appointment = await this.appointmentModel
-      .findOne({ _id: appointmentId, owner: new Types.ObjectId(userId) })
-      .exec();
-    if (!appointment) {
-      throw new NotFoundException({ message: 'Appointment not found', code: 'APPOINTMENT_NOT_FOUND' });
-    }
-
-    if (appointment.paymentMethod === 'cod') {
-      throw new BadRequestException({
-        message: 'Cash-on-delivery appointments do not require payment proof',
-        code: 'PROOF_NOT_APPLICABLE',
-      });
-    }
-    if (appointment.paymentStatus !== 'pending') {
-      throw new BadRequestException({
-        message: 'Payment proof can only be submitted while payment is pending',
-        code: 'INVALID_STATUS',
+    dto: CreateAppointmentReservationDto,
+  ): Promise<ServiceResponse<AppointmentReservationResponse>> {
+    if (
+      !Types.ObjectId.isValid(dto.vetId) ||
+      !Types.ObjectId.isValid(dto.petId)
+    ) {
+      throw new NotFoundException({
+        message: 'Vet or pet not found',
+        code: 'NOT_FOUND',
       });
     }
 
-    const proofKey = await this.s3Service.uploadPrivateImage(proof, 'appointment-payments');
-    appointment.paymentProofUrl = proofKey;
-    appointment.paymentSubmittedAt = new Date();
-    appointment.paymentStatus = 'proof_submitted';
-    await appointment.save();
+    const [vet, pet] = await Promise.all([
+      this.vetModel.findOne({
+        _id: dto.vetId,
+        verified: true,
+        subscriptionStatus: 'active',
+      }),
+      this.petModel.findOne({
+        _id: dto.petId,
+        owner: new Types.ObjectId(userId),
+        isActive: true,
+      }),
+    ]);
 
-    return { data: await this.toResponse(appointment), message: 'Payment proof submitted' };
+    if (!vet) {
+      throw new NotFoundException({
+        message: 'Vet not found',
+        code: 'VET_NOT_FOUND',
+      });
+    }
+    if (!pet) {
+      throw new NotFoundException({
+        message: 'Pet not found',
+        code: 'PET_NOT_FOUND',
+      });
+    }
+
+    if (dto.fee < vet.fee.min || dto.fee > vet.fee.max) {
+      throw new HttpException(
+        {
+          message: `Fee must be between ${vet.fee.min} and ${vet.fee.max} PKR`,
+          code: 'INVALID_FEE',
+        },
+        HttpStatus.UNPROCESSABLE_ENTITY,
+      );
+    }
+
+    const slotTaken = await this.appointmentModel.exists({
+      vet: new Types.ObjectId(dto.vetId),
+      date: dto.date,
+      timeSlot: dto.timeSlot,
+      status: { $in: ['pending', 'confirmed'] },
+    });
+
+    if (slotTaken) {
+      throw new UnprocessableEntityException({
+        message: 'This time slot is no longer available',
+        code: 'SLOT_UNAVAILABLE',
+      });
+    }
+
+    const fee = dto.fee;
+    const platformCommission = PLATFORM_COMMISSION_PKR;
+    const vetPayout = fee - platformCommission;
+    const expiresAt = new Date(
+      Date.now() + RESERVATION_TTL_MINUTES * 60 * 1000,
+    );
+
+    // Clears out a stale reservation for this exact slot before attempting the insert, so an
+    // expired reservation that hasn't been physically TTL-swept yet (up to ~60s lag) never
+    // falsely blocks a legitimately-new one. This is a no-op if nothing expired is there.
+    await this.reservationModel.deleteOne({
+      vet: new Types.ObjectId(dto.vetId),
+      date: dto.date,
+      timeSlot: dto.timeSlot,
+      expiresAt: { $lte: new Date() },
+    });
+
+    let reservation: AppointmentReservationDocument;
+    try {
+      reservation = await this.reservationModel.create({
+        pet: new Types.ObjectId(dto.petId),
+        vet: new Types.ObjectId(dto.vetId),
+        owner: new Types.ObjectId(userId),
+        date: dto.date,
+        timeSlot: dto.timeSlot,
+        fee,
+        platformCommission,
+        vetPayout,
+        vetDetails: {
+          name: vet.name,
+          clinicName: vet.clinicName,
+          address: vet.address,
+          phone: vet.phone,
+        },
+        petDetails: {
+          name: pet.name,
+          species: pet.species,
+        },
+        expiresAt,
+      });
+    } catch (err: unknown) {
+      // The unique (vet, date, timeSlot) index is what actually closes the race: if another
+      // request's reservation for this exact slot won the insert first, this one collides here
+      // — atomically, at the database level — rather than both slipping through a check-then-
+      // create gap. Anything else is a genuine unexpected error and should propagate.
+      if ((err as { code?: number }).code === 11000) {
+        throw new UnprocessableEntityException({
+          message: 'This time slot is no longer available',
+          code: 'SLOT_UNAVAILABLE',
+        });
+      }
+      throw err;
+    }
+
+    const reservationId = reservation._id.toString();
+    const frontendBaseUrl = this.config.getOrThrow<string>('FRONTEND_BASE_URL');
+    const { trackerToken, checkoutUrl } =
+      await this.safepayService.createCheckoutSession(
+        fee,
+        reservationId,
+        `${frontendBaseUrl}/callback?type=appointment&id=${reservationId}&result=success`,
+        `${frontendBaseUrl}/callback?type=appointment&id=${reservationId}&result=cancelled`,
+      );
+    reservation.paymentReference = trackerToken;
+    await reservation.save();
+
+    return {
+      data: toAppointmentReservationResponse(reservation, checkoutUrl),
+      message: 'Reservation created — complete payment before it expires',
+    };
+  }
+
+  // The backend creates the Safepay checkout session itself (see createReservation above),
+  // so it always knows the tracker/amount up front rather than trusting the client to declare
+  // them — this re-check is defense-in-depth against a tampered or replayed webhook, not a
+  // substitute for not knowing what should have been charged.
+  //
+  // Matched by order_id (the reservation's own _id, set as Safepay's order_id when the session
+  // was created). Never throws: Safepay expects a 2xx ack within 10s regardless of outcome, or
+  // it retries.
+  async handleSafepayEvent(event: SafepayWebhookEvent): Promise<void> {
+    const orderId = extractOrderId(event);
+    if (!orderId || !Types.ObjectId.isValid(orderId)) {
+      this.logger.warn(
+        `Safepay webhook missing/invalid order_id: ${JSON.stringify(event)}`,
+      );
+      return;
+    }
+    const reservationObjectId = new Types.ObjectId(orderId);
+    const tracker = extractTrackerToken(event);
+
+    if (event.type === 'payment.succeeded') {
+      // Deliberately not filtered by expiresAt > now: a webhook that's merely a little late for
+      // a payment which genuinely started in-window should still succeed as long as the doc
+      // hasn't been physically swept by Mongo's TTL monitor yet (~60s lag after logical expiry).
+      const reservation = await this.reservationModel
+        .findById(reservationObjectId)
+        .exec();
+      if (!reservation) {
+        this.logger.warn(
+          `Safepay payment.succeeded: no reservation for order_id ${orderId} (already promoted, or expired past TTL sweep)`,
+        );
+        return;
+      }
+
+      const paidAmount = extractAmount(event);
+      if (paidAmount !== undefined && paidAmount !== reservation.fee) {
+        this.logger.error(
+          `Safepay payment.succeeded: amount mismatch for reservation ${orderId} — expected ${reservation.fee}, got ${paidAmount}. Not promoting.`,
+        );
+        return;
+      }
+
+      // Atomic consume: a duplicate webhook delivery finds nothing on its second lookup, same
+      // idempotency guarantee the old paymentStatus:'pending' match used to provide.
+      const consumed = await this.reservationModel
+        .findByIdAndDelete(reservationObjectId)
+        .lean()
+        .exec();
+      if (!consumed) {
+        this.logger.warn(
+          `Safepay payment.succeeded: reservation ${orderId} was already consumed by a concurrent webhook delivery`,
+        );
+        return;
+      }
+
+      // Reuses the reservation's own _id (== the order_id the app already has from
+      // POST /appointments/reservations) rather than letting Mongo assign a fresh one — the
+      // app polls GET /appointments/:id with that same ID expecting it to eventually resolve
+      // into the real appointment, not 404 forever.
+      const appointment = await this.appointmentModel.create({
+        _id: consumed._id,
+        pet: consumed.pet,
+        vet: consumed.vet,
+        owner: consumed.owner,
+        date: consumed.date,
+        timeSlot: consumed.timeSlot,
+        paymentMethod: 'safepay',
+        fee: consumed.fee,
+        platformCommission: consumed.platformCommission,
+        vetPayout: consumed.vetPayout,
+        vetDetails: consumed.vetDetails,
+        petDetails: consumed.petDetails,
+        status: 'confirmed',
+        paymentStatus: 'held',
+        paymentReference: tracker,
+      });
+
+      const notifyTargets = await this.clinicTeamService.resolveNotifyTargets(
+        appointment.vet.toString(),
+      );
+      await this.notificationsService.createForRecipients(
+        notifyTargets,
+        'vet',
+        'booking',
+        'Payment received',
+        `${appointment.petDetails.name}'s appointment on ${appointment.date} — PKR ${appointment.fee} confirmed`,
+        (appointment._id as Types.ObjectId).toString(),
+      );
+      return;
+    }
+
+    if (event.type === 'payment.failed') {
+      // Actively delete rather than waiting out the TTL — frees the slot immediately on a
+      // definitive "no", rather than making the next booker wait out the full reservation window.
+      const deleted = await this.reservationModel
+        .findByIdAndDelete(reservationObjectId)
+        .exec();
+      if (!deleted) {
+        this.logger.warn(
+          `Safepay payment.failed: no matching reservation for order_id ${orderId}`,
+        );
+      }
+      return;
+    }
+
+    this.logger.log(`Ignoring unhandled Safepay event type: ${event.type}`);
   }
 
   async listAppointments(
@@ -204,11 +502,18 @@ export class AppointmentsService {
     const limit = dto.limit ?? 20;
     const skip = (page - 1) * limit;
 
-    const filter: Record<string, unknown> = { owner: new Types.ObjectId(userId) };
+    const filter: Record<string, unknown> = {
+      owner: new Types.ObjectId(userId),
+    };
     if (dto.status) filter.status = dto.status;
 
     const [items, total] = await Promise.all([
-      this.appointmentModel.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).exec(),
+      this.appointmentModel
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .exec(),
       this.appointmentModel.countDocuments(filter),
     ]);
 
@@ -224,27 +529,10 @@ export class AppointmentsService {
     appointmentId: string,
   ): Promise<ServiceResponse<AppointmentResponse>> {
     const appointment = await this.findOwnedAppointment(userId, appointmentId);
-    return { data: await this.toResponse(appointment), message: 'Appointment fetched' };
-  }
-
-  async verifyAppointmentPayment(
-    vetId: string,
-    appointmentId: string,
-  ): Promise<ServiceResponse<AppointmentResponse>> {
-    const appointment = await this.findVetAppointment(vetId, appointmentId);
-
-    if (appointment.paymentStatus !== 'proof_submitted') {
-      throw new UnprocessableEntityException({
-        message: 'Only an appointment with submitted payment proof can be verified',
-        code: 'INVALID_STATUS_TRANSITION',
-      });
-    }
-
-    appointment.paymentStatus = 'held';
-    appointment.status = 'confirmed';
-    await appointment.save();
-
-    return { data: await this.toResponse(appointment), message: 'Payment verified — appointment confirmed' };
+    return {
+      data: await this.toResponse(appointment),
+      message: 'Appointment fetched',
+    };
   }
 
   async completeAppointment(
@@ -253,18 +541,60 @@ export class AppointmentsService {
   ): Promise<ServiceResponse<AppointmentResponse>> {
     const appointment = await this.findVetAppointment(vetId, appointmentId);
 
-    if (!['pending', 'confirmed', 'in-progress'].includes(appointment.status)) {
+    if (!isValidAppointmentTransition(appointment.status, 'completed')) {
       throw new UnprocessableEntityException({
-        message: 'Only pending, confirmed, or in-progress appointments can be marked complete',
+        message:
+          'Only pending, confirmed, or in-progress appointments can be marked complete',
         code: 'INVALID_STATUS_TRANSITION',
       });
     }
 
     appointment.status = 'completed';
-    appointment.paymentStatus = 'released';
+    if (appointment.paymentMethod === 'safepay' && appointment.paymentStatus === 'held') {
+      appointment.payoutEligibleAt = new Date(Date.now() + PAYOUT_HOLD_MS);
+    } else {
+      // COD never had platform-held escrow to begin with — nothing to hold or dispute here.
+      appointment.paymentStatus = 'released';
+    }
     await appointment.save();
 
-    return { data: await this.toResponse(appointment), message: 'Appointment marked complete' };
+    return {
+      data: await this.toResponse(appointment),
+      message: 'Appointment marked complete',
+    };
+  }
+
+  async disputeAppointment(
+    userId: string,
+    appointmentId: string,
+    reason: string,
+  ): Promise<ServiceResponse<AppointmentResponse>> {
+    const appointment = await this.findOwnedAppointment(userId, appointmentId);
+
+    if (appointment.status !== 'completed' || appointment.paymentStatus !== 'held') {
+      throw new UnprocessableEntityException({
+        message: 'Only a completed appointment with a payout still pending can be disputed',
+        code: 'NOT_DISPUTABLE',
+      });
+    }
+    if (
+      !appointment.payoutEligibleAt ||
+      appointment.payoutEligibleAt.getTime() <= Date.now()
+    ) {
+      throw new UnprocessableEntityException({
+        message: 'The window to report a problem with this appointment has passed',
+        code: 'DISPUTE_WINDOW_CLOSED',
+      });
+    }
+
+    appointment.status = 'disputed';
+    appointment.disputeReason = reason;
+    await appointment.save();
+
+    return {
+      data: await this.toResponse(appointment),
+      message: 'Appointment disputed — under review',
+    };
   }
 
   async cancelAppointment(
@@ -273,7 +603,7 @@ export class AppointmentsService {
   ): Promise<ServiceResponse<AppointmentResponse>> {
     const appointment = await this.findOwnedAppointment(userId, appointmentId);
 
-    if (!['pending', 'confirmed'].includes(appointment.status)) {
+    if (!isValidAppointmentTransition(appointment.status, 'cancelled')) {
       throw new UnprocessableEntityException({
         message: 'Only pending or confirmed appointments can be cancelled',
         code: 'INVALID_STATUS_TRANSITION',
@@ -286,7 +616,10 @@ export class AppointmentsService {
     }
     await appointment.save();
 
-    return { data: await this.toResponse(appointment), message: 'Appointment cancelled' };
+    return {
+      data: await this.toResponse(appointment),
+      message: 'Appointment cancelled',
+    };
   }
 
   async submitReview(
@@ -342,7 +675,10 @@ export class AppointmentsService {
     };
   }
 
-  private async updateVetRating(vetId: string, newRating: number): Promise<void> {
+  private async updateVetRating(
+    vetId: string,
+    newRating: number,
+  ): Promise<void> {
     const vet = await this.vetModel
       .findById(vetId)
       .select('rating reviewCount')
@@ -350,7 +686,9 @@ export class AppointmentsService {
     if (!vet) return;
 
     const newCount = vet.reviewCount + 1;
-    const newAvg = Math.round(((vet.rating * vet.reviewCount) + newRating) / newCount * 10) / 10;
+    const newAvg =
+      Math.round(((vet.rating * vet.reviewCount + newRating) / newCount) * 10) /
+      10;
 
     await this.vetModel.updateOne(
       { _id: vetId },
@@ -358,43 +696,66 @@ export class AppointmentsService {
     );
   }
 
-  private async toResponse(appointment: AppointmentDocument): Promise<AppointmentResponse> {
+  private async toResponse(
+    appointment: AppointmentDocument,
+  ): Promise<AppointmentResponse> {
     const [response] = await this.toResponseList([appointment]);
     return response;
   }
 
-  // Batches the vet->clinic payout-account lookup and resolves a fresh signed proof URL for
-  // every appointment in one pass, so listAppointments doesn't N+1 per row.
-  private async toResponseList(appointments: AppointmentDocument[]): Promise<AppointmentResponse[]> {
+  // Batches the vet->clinic payout-account lookup for every appointment in one pass, so
+  // listAppointments doesn't N+1 per row.
+  private async toResponseList(
+    appointments: AppointmentDocument[],
+  ): Promise<AppointmentResponse[]> {
     if (appointments.length === 0) return [];
 
-    const vetIds = [...new Set(
-      appointments.filter((a) => a.paymentMethod !== 'cod').map((a) => a.vet.toString()),
-    )];
+    const vetIds = [
+      ...new Set(
+        appointments
+          .filter((a) => a.paymentMethod !== 'cod')
+          .map((a) => a.vet.toString()),
+      ),
+    ];
     const vets = vetIds.length
-      ? await this.vetModel.find({ _id: { $in: vetIds } }).select('clinicId').lean().exec()
+      ? await this.vetModel
+          .find({ _id: { $in: vetIds } })
+          .select('clinicId')
+          .lean()
+          .exec()
       : [];
-    const clinicIds = [...new Set(
-      vets.filter((v) => v.clinicId).map((v) => (v.clinicId as Types.ObjectId).toString()),
-    )];
+    const clinicIds = [
+      ...new Set(
+        vets
+          .filter((v) => v.clinicId)
+          .map((v) => (v.clinicId as Types.ObjectId).toString()),
+      ),
+    ];
     const clinics = clinicIds.length
-      ? await this.clinicModel.find({ _id: { $in: clinicIds } }).lean().exec()
+      ? await this.clinicModel
+          .find({ _id: { $in: clinicIds } })
+          .lean()
+          .exec()
       : [];
-    const clinicMap = new Map(clinics.map((c) => [(c._id as Types.ObjectId).toString(), c]));
+    const clinicMap = new Map(
+      clinics.map((c) => [(c._id as Types.ObjectId).toString(), c]),
+    );
     const vetClinicMap = new Map(
       vets.map((v) => [
         (v._id as Types.ObjectId).toString(),
-        v.clinicId ? (clinicMap.get((v.clinicId as Types.ObjectId).toString()) ?? null) : null,
+        v.clinicId
+          ? (clinicMap.get((v.clinicId as Types.ObjectId).toString()) ?? null)
+          : null,
       ]),
     );
 
-    return Promise.all(appointments.map(async (a) => {
-      const clinic = a.paymentMethod === 'cod' ? null : vetClinicMap.get(a.vet.toString()) ?? null;
-      const paymentProofUrl = a.paymentProofUrl
-        ? await this.s3Service.getSignedReadUrl(a.paymentProofUrl)
-        : null;
-      return toAppointmentResponse(a, paymentProofUrl, clinic);
-    }));
+    return appointments.map((a) => {
+      const clinic =
+        a.paymentMethod === 'cod'
+          ? null
+          : (vetClinicMap.get(a.vet.toString()) ?? null);
+      return toAppointmentResponse(a, clinic);
+    });
   }
 
   private async findOwnedAppointment(
@@ -417,7 +778,10 @@ export class AppointmentsService {
     }
 
     if (appointment.owner.toString() !== userId) {
-      throw new ForbiddenException({ message: 'Not authorized', code: 'FORBIDDEN' });
+      throw new ForbiddenException({
+        message: 'Not authorized',
+        code: 'FORBIDDEN',
+      });
     }
 
     return appointment;
@@ -443,7 +807,10 @@ export class AppointmentsService {
     }
 
     if (appointment.vet.toString() !== vetId) {
-      throw new ForbiddenException({ message: 'Not authorized', code: 'FORBIDDEN' });
+      throw new ForbiddenException({
+        message: 'Not authorized',
+        code: 'FORBIDDEN',
+      });
     }
 
     return appointment;

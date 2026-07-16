@@ -3,6 +3,10 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { Vet, VetSchema } from '../../database/schemas/vet.schema';
 import { Clinic, ClinicSchema } from '../../database/schemas/clinic.schema';
 import { Appointment, AppointmentSchema } from '../../database/schemas/appointment.schema';
+import {
+  AppointmentReservation,
+  AppointmentReservationSchema,
+} from '../../database/schemas/appointment-reservation.schema';
 import { Pet, PetSchema } from '../../database/schemas/pet.schema';
 import { User, UserSchema } from '../../database/schemas/user.schema';
 import { Review, ReviewSchema } from '../../database/schemas/review.schema';
@@ -22,6 +26,7 @@ import {
   ConsultationSessionSchema,
 } from '../../database/schemas/consultation-session.schema';
 import { RealtimeModule } from '../realtime/realtime.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { VetPortalService } from './vet-portal.service';
 import {
   VetScheduleController,
@@ -30,6 +35,7 @@ import {
   VetEarningsController,
   VetPayoutsController,
   VetTeamController,
+  VetNotificationsController,
   VetListingsController,
   VetClinicSettingsController,
   VetAvailabilityController,
@@ -47,6 +53,7 @@ import {
       { name: Vet.name, schema: VetSchema },
       { name: Clinic.name, schema: ClinicSchema },
       { name: Appointment.name, schema: AppointmentSchema },
+      { name: AppointmentReservation.name, schema: AppointmentReservationSchema },
       { name: Pet.name, schema: PetSchema },
       { name: User.name, schema: UserSchema },
       { name: Review.name, schema: ReviewSchema },
@@ -64,6 +71,7 @@ import {
       { name: ConsultationSession.name, schema: ConsultationSessionSchema },
     ]),
     RealtimeModule,
+    NotificationsModule,
   ],
   controllers: [
     VetScheduleController,
@@ -72,6 +80,7 @@ import {
     VetEarningsController,
     VetPayoutsController,
     VetTeamController,
+    VetNotificationsController,
     VetListingsController,
     VetClinicSettingsController,
     VetAvailabilityController,

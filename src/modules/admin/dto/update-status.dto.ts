@@ -45,3 +45,10 @@ export class ResolveConsultationDto {
   @IsIn(['approve', 'reject'])
   outcome: 'approve' | 'reject';
 }
+
+export class ResolveAppointmentDisputeDto {
+  @ApiProperty({ enum: ['release', 'refund'] })
+  @IsString()
+  @IsIn(['release', 'refund'])
+  outcome: 'release' | 'refund';
+}

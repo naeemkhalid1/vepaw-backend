@@ -1,11 +1,14 @@
 import {
   Body,
   Controller,
+  DefaultValuePipe,
   Delete,
   Get,
   HttpCode,
   HttpStatus,
   Param,
+  ParseIntPipe,
+  Patch,
   Post,
   Put,
   Query,
@@ -15,6 +18,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { VetPortalService } from './vet-portal.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { ClinicRoles } from '../../common/decorators/clinic-roles.decorator';
 import { Public } from '../../common/decorators/public.decorator';
@@ -260,6 +264,40 @@ export class VetTeamController {
   }
 }
 
+// ─── Notifications ─────────────────────────────────────
+
+@ApiTags('vet-notifications')
+@Controller('vet/notifications')
+@ApiBearerAuth()
+@Roles('vet')
+export class VetNotificationsController {
+  constructor(private readonly notificationsService: NotificationsService) {}
+
+  @Get()
+  @ApiOperation({ summary: 'List notifications (paginated)' })
+  list(
+    @CurrentUser() user: JwtPayload,
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
+    @Query('limit', new DefaultValuePipe(30), ParseIntPipe) limit: number,
+  ) {
+    return this.notificationsService.listForVet(user.sub, page, limit);
+  }
+
+  @Patch('read-all')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Mark all notifications as read' })
+  markAllRead(@CurrentUser() user: JwtPayload) {
+    return this.notificationsService.markAllVetRead(user.sub);
+  }
+
+  @Patch(':id/read')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Mark a notification as read' })
+  markRead(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.notificationsService.markVetRead(user.sub, id);
+  }
+}
+
 // ─── Listings ──────────────────────────────────────────
 
 @ApiTags('vet-listings')
@@ -326,7 +364,7 @@ export class VetClinicSettingsController {
 
   @Post('payout')
   @HttpCode(HttpStatus.OK)
-  @ClinicRoles('admin_vet', 'accountant')
+  @ClinicRoles('admin_vet', 'manager')
   @ApiOperation({ summary: 'Submit new payout account' })
   updatePayoutAccount(@CurrentUser() user: JwtPayload, @Body() dto: UpdatePayoutAccountDto) {
     return this.service.updateVetPayoutAccount(user.sub, dto.accountNumber);

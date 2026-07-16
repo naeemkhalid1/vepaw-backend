@@ -3,7 +3,6 @@ import { HydratedDocument, Types } from 'mongoose';
 
 export const CONSULTATION_STATUSES = [
   'pending_payment',
-  'payment_submitted',
   'active',
   'disputed',
   'closed',
@@ -46,11 +45,9 @@ export class ConsultationSession {
   })
   status: ConsultationStatus;
 
+  // Safepay tracker token — the webhook matches on this to apply payment.succeeded/failed events.
   @Prop({ type: String, default: null })
-  paymentProofUrl: string | null;
-
-  @Prop({ type: Date, default: null })
-  paymentSubmittedAt: Date | null;
+  paymentReference: string | null;
 
   @Prop({ type: Date, default: null })
   paidAt: Date | null;
@@ -70,8 +67,8 @@ export class ConsultationSession {
   @Prop({ type: Types.ObjectId, ref: 'Vet', default: null })
   resolvedBy: Types.ObjectId | null;
 
-  @Prop({ type: String, enum: ['admin_vet', 'team_vet', 'accountant'], default: null })
-  resolvedByRole: 'admin_vet' | 'team_vet' | 'accountant' | null;
+  @Prop({ type: String, enum: ['admin_vet', 'team_vet', 'manager'], default: null })
+  resolvedByRole: 'admin_vet' | 'team_vet' | 'manager' | null;
 
   @Prop({ type: String, default: null })
   disputeReason: string | null;

@@ -15,6 +15,7 @@ export function toConsultationSessionResponse(
   vetName: string,
   ownerName: string,
   clinic?: Pick<Clinic, 'payoutMethod' | 'accountTitle' | 'mobileAccount'> | null,
+  checkoutUrl?: string | null,
 ): ConsultationSessionResponse {
   return {
     id: s._id.toString(),
@@ -26,8 +27,8 @@ export function toConsultationSessionResponse(
     vetName,
     amount: s.amount,
     status: s.status,
-    paymentProofUrl: s.paymentProofUrl,
-    paymentSubmittedAt: s.paymentSubmittedAt,
+    paymentReference: s.paymentReference,
+    checkoutUrl,
     paidAt: s.paidAt,
     startedAt: s.startedAt,
     autoExpireAt: s.autoExpireAt,

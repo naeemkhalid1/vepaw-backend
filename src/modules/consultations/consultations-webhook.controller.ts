@@ -1,0 +1,44 @@
+import {
+  Controller,
+  Headers,
+  Post,
+  Req,
+  UnauthorizedException,
+} from '@nestjs/common';
+import type { RawBodyRequest } from '@nestjs/common';
+import type { Request } from 'express';
+import { ApiExcludeController } from '@nestjs/swagger';
+import { ConsultationsService } from './consultations.service';
+import { Public } from '../../common/decorators/public.decorator';
+import { SafepayService } from '../../common/payments/safepay.service';
+import { SafepayWebhookEvent } from '../../common/payments/safepay-webhook-event.interface';
+
+@ApiExcludeController()
+@Public()
+@Controller('consultations/webhooks')
+export class ConsultationsWebhookController {
+  constructor(
+    private readonly consultationsService: ConsultationsService,
+    private readonly safepayService: SafepayService,
+  ) {}
+
+  @Post('safepay')
+  async handleSafepayWebhook(
+    @Req() req: RawBodyRequest<Request>,
+    @Headers('x-sfpy-signature') signature: string | undefined,
+  ): Promise<{ received: true }> {
+    if (
+      !req.rawBody ||
+      !this.safepayService.verifyWebhookSignature(req.rawBody, signature)
+    ) {
+      throw new UnauthorizedException('Invalid webhook signature');
+    }
+
+    const event = JSON.parse(
+      req.rawBody.toString('utf8'),
+    ) as SafepayWebhookEvent;
+    await this.consultationsService.handleSafepayEvent(event);
+
+    return { received: true };
+  }
+}

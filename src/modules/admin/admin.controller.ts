@@ -27,6 +27,7 @@ import {
   UpdateUserStatusDto,
   UpdateTransactionStatusDto,
   ResolveConsultationDto,
+  ResolveAppointmentDisputeDto,
 } from './dto/update-status.dto';
 
 // ─── Admin Auth ──────────────────────────────────────
@@ -189,6 +190,17 @@ export class AdminTransactionsController {
   @ApiOperation({ summary: 'Release escrow payout' })
   releaseEscrow(@Param('id') id: string) {
     return this.service.releaseEscrow(id);
+  }
+
+  @Post(':id/resolve-dispute')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Resolve a disputed appointment payout (release to vet or refund owner)' })
+  resolveAppointmentDispute(
+    @CurrentUser() admin: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: ResolveAppointmentDisputeDto,
+  ) {
+    return this.service.resolveDisputedAppointment(id, admin.sub, dto.outcome);
   }
 }
 

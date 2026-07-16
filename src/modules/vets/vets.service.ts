@@ -4,6 +4,10 @@ import { Model, PipelineStage, Types } from 'mongoose';
 import { Vet, VetDocument } from '../../database/schemas/vet.schema';
 import { Review, ReviewDocument } from '../../database/schemas/review.schema';
 import { Appointment, AppointmentDocument } from '../../database/schemas/appointment.schema';
+import {
+  AppointmentReservation,
+  AppointmentReservationDocument,
+} from '../../database/schemas/appointment-reservation.schema';
 import { TimeOff, TimeOffDocument } from '../../database/schemas/time-off.schema';
 import { BlockedSlot, BlockedSlotDocument } from '../../database/schemas/blocked-slot.schema';
 import {
@@ -38,6 +42,8 @@ export class VetsService {
     @InjectModel(Review.name) private readonly reviewModel: Model<ReviewDocument>,
     @InjectModel(Appointment.name)
     private readonly appointmentModel: Model<AppointmentDocument>,
+    @InjectModel(AppointmentReservation.name)
+    private readonly reservationModel: Model<AppointmentReservationDocument>,
     @InjectModel(TimeOff.name) private readonly timeOffModel: Model<TimeOffDocument>,
     @InjectModel(BlockedSlot.name) private readonly blockedSlotModel: Model<BlockedSlotDocument>,
   ) {}
@@ -224,18 +230,32 @@ export class VetsService {
       return { data: [], message: 'Vet is off on this day' };
     }
 
-    const [booked, blockedSlots] = await Promise.all([
+    const [booked, blockedSlots, reserved] = await Promise.all([
       this.appointmentModel
-        .find({ vet: vetId, date: dto.date, status: { $in: ['pending', 'confirmed'] } })
+        .find({
+          vet: new Types.ObjectId(vetId),
+          date: dto.date,
+          status: { $in: ['pending', 'confirmed'] },
+        })
         .select('timeSlot')
         .lean<{ timeSlot: string }[]>(),
       this.blockedSlotModel
         .find({ vet: new Types.ObjectId(vetId), date: dto.date })
         .lean()
         .exec(),
+      // Safepay reservations mid-checkout soft-lock a slot too, even though no real
+      // Appointment exists yet — otherwise a second browser would see it as bookable.
+      this.reservationModel
+        .find({
+          vet: new Types.ObjectId(vetId),
+          date: dto.date,
+          expiresAt: { $gt: new Date() },
+        })
+        .select('timeSlot')
+        .lean<{ timeSlot: string }[]>(),
     ]);
 
-    const bookedSet = new Set(booked.map((a) => a.timeSlot));
+    const bookedSet = new Set([...booked, ...reserved].map((a) => a.timeSlot));
     const blockedSet = new Set(blockedSlots.map((b) => b.time));
 
     return {

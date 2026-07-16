@@ -210,10 +210,10 @@ export class Vet {
 
   @Prop({
     type: String,
-    enum: ['admin_vet', 'team_vet', 'accountant'],
+    enum: ['admin_vet', 'team_vet', 'manager'],
     default: null,
   })
-  staffRole: 'admin_vet' | 'team_vet' | 'accountant' | null;
+  staffRole: 'admin_vet' | 'team_vet' | 'manager' | null;
 }
 
 export const VetSchema = SchemaFactory.createForClass(Vet);

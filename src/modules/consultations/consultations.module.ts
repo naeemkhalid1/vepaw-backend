@@ -13,6 +13,7 @@ import { Message, MessageSchema } from '../../database/schemas/message.schema';
 import { User, UserSchema } from '../../database/schemas/user.schema';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { ConsultationsController } from './consultations.controller';
+import { ConsultationsWebhookController } from './consultations-webhook.controller';
 import { ConsultationsService } from './consultations.service';
 
 @Module({
@@ -29,7 +30,7 @@ import { ConsultationsService } from './consultations.service';
     ]),
     RealtimeModule,
   ],
-  controllers: [ConsultationsController],
+  controllers: [ConsultationsController, ConsultationsWebhookController],
   providers: [ConsultationsService],
   exports: [ConsultationsService],
 })

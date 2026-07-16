@@ -5,8 +5,10 @@ import { AppointmentResponse } from '../types';
 
 export function toAppointmentResponse(
   apt: AppointmentDocument,
-  paymentProofUrl: string | null,
-  clinic?: Pick<Clinic, 'payoutMethod' | 'accountTitle' | 'mobileAccount'> | null,
+  clinic?: Pick<
+    Clinic,
+    'payoutMethod' | 'accountTitle' | 'mobileAccount'
+  > | null,
 ): AppointmentResponse {
   return {
     id: apt._id.toString(),
@@ -22,8 +24,6 @@ export function toAppointmentResponse(
     paymentMethod: apt.paymentMethod,
     paymentStatus: apt.paymentStatus,
     paymentReference: apt.paymentReference,
-    paymentProofUrl,
-    paymentSubmittedAt: apt.paymentSubmittedAt,
     paymentAccount: clinic
       ? {
           payoutMethod: clinic.payoutMethod,
@@ -33,6 +33,8 @@ export function toAppointmentResponse(
       : null,
     notes: apt.notes,
     reviewId: apt.reviewId ? (apt.reviewId as Types.ObjectId).toString() : null,
+    payoutEligibleAt: apt.payoutEligibleAt,
+    disputeReason: apt.disputeReason,
     vetDetails: apt.vetDetails,
     petDetails: apt.petDetails,
     createdAt: apt.createdAt,
