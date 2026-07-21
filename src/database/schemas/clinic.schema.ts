@@ -11,14 +11,23 @@ export class Clinic {
   @Prop({ required: true, trim: true })
   name: string;
 
-  @Prop({ type: String, default: null })
-  payoutMethod: string | null;
+  @Prop({ type: String, enum: ['jazzcash', 'easypaisa', 'bank_transfer'], default: null })
+  payoutMethod: 'jazzcash' | 'easypaisa' | 'bank_transfer' | null;
 
   @Prop({ type: String, default: null })
   accountTitle: string | null;
 
+  // Wallet number (JazzCash/Easypaisa) — required when payoutMethod is 'jazzcash' or 'easypaisa'.
   @Prop({ type: String, default: null })
-  mobileAccount: string | null;
+  walletNumber: string | null;
+
+  // Required when payoutMethod is 'bank_transfer'.
+  @Prop({ type: String, default: null })
+  bankName: string | null;
+
+  // Bank account number or IBAN — required when payoutMethod is 'bank_transfer'.
+  @Prop({ type: String, default: null })
+  accountNumber: string | null;
 
   @Prop({ type: String, default: null })
   cnicOnAccount: string | null;

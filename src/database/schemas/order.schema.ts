@@ -67,10 +67,10 @@ export class Order {
 
   @Prop({
     type: String,
-    enum: ['jazzcash', 'easypaisa', 'cod'],
+    enum: ['safepay', 'cod'],
     required: true,
   })
-  paymentMethod: 'jazzcash' | 'easypaisa' | 'cod';
+  paymentMethod: 'safepay' | 'cod';
 
   @Prop({
     type: String,
@@ -78,6 +78,16 @@ export class Order {
     default: 'pending',
   })
   paymentStatus: 'pending' | 'paid' | 'refunded';
+
+  // Safepay tracker token — the webhook matches on this to apply payment.succeeded/failed
+  // events. Null for 'cod' orders, which never call Safepay at all.
+  @Prop({ type: String, default: null })
+  paymentReference: string | null;
+
+  // Set once this order's storePayout has been included in a batched Payout — excludes it from
+  // future "available to withdraw" totals so it can't be paid out twice.
+  @Prop({ type: Types.ObjectId, ref: 'Payout', default: null })
+  payoutId: Types.ObjectId | null;
 
   @Prop({
     type: {

@@ -1,4 +1,4 @@
-import { IsArray, IsEmail, IsNotEmpty, IsOptional, IsString, MinLength } from 'class-validator';
+import { IsArray, IsEmail, IsIn, IsNotEmpty, IsOptional, IsString, Matches, MinLength, ValidateIf } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class SubmitOnboardingDto {
@@ -97,20 +97,33 @@ export class SubmitOnboardingDto {
   @IsOptional()
   clinicPhoto?: { name: string; status: string } | null;
 
-  @ApiProperty()
+  @ApiProperty({ enum: ['jazzcash', 'easypaisa', 'bank_transfer'] })
   @IsString()
-  @IsNotEmpty()
-  payoutMethod: string;
+  @IsIn(['jazzcash', 'easypaisa', 'bank_transfer'])
+  payoutMethod: 'jazzcash' | 'easypaisa' | 'bank_transfer';
 
   @ApiProperty()
   @IsString()
   @IsNotEmpty()
   accountTitle: string;
 
-  @ApiProperty()
+  @ApiPropertyOptional({ description: "11-digit wallet number, required when payoutMethod is 'jazzcash' or 'easypaisa'" })
+  @ValidateIf((o: SubmitOnboardingDto) => o.payoutMethod === 'jazzcash' || o.payoutMethod === 'easypaisa')
   @IsString()
-  @MinLength(10)
-  mobileAccount: string;
+  @Matches(/^03\d{9}$/, { message: 'walletNumber must be an 11-digit Pakistani mobile number (e.g. 03001234567)' })
+  walletNumber?: string;
+
+  @ApiPropertyOptional({ description: "Required when payoutMethod is 'bank_transfer'" })
+  @ValidateIf((o: SubmitOnboardingDto) => o.payoutMethod === 'bank_transfer')
+  @IsString()
+  @IsNotEmpty()
+  bankName?: string;
+
+  @ApiPropertyOptional({ description: "Bank account number or IBAN, required when payoutMethod is 'bank_transfer'" })
+  @ValidateIf((o: SubmitOnboardingDto) => o.payoutMethod === 'bank_transfer')
+  @IsString()
+  @MinLength(5)
+  accountNumber?: string;
 
   @ApiProperty()
   @IsString()

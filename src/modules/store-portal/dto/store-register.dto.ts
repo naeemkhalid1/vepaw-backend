@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsOptional, IsString, MinLength } from 'class-validator';
+import { IsIn, IsNotEmpty, IsOptional, IsString, Matches, MinLength, ValidateIf } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class StoreRegisterDto {
@@ -36,13 +36,31 @@ export class StoreRegisterDto {
   @IsOptional()
   businessProof?: { name: string; status: string } | null;
 
-  @ApiProperty()
+  @ApiProperty({ enum: ['jazzcash', 'easypaisa', 'bank_transfer'] })
+  @IsString()
+  @IsIn(['jazzcash', 'easypaisa', 'bank_transfer'])
+  payoutMethod: 'jazzcash' | 'easypaisa' | 'bank_transfer';
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  accountTitle?: string;
+
+  @ApiPropertyOptional({ description: "11-digit wallet number, required when payoutMethod is 'jazzcash' or 'easypaisa'" })
+  @ValidateIf((o: StoreRegisterDto) => o.payoutMethod === 'jazzcash' || o.payoutMethod === 'easypaisa')
+  @IsString()
+  @Matches(/^03\d{9}$/, { message: 'walletNumber must be an 11-digit Pakistani mobile number (e.g. 03001234567)' })
+  walletNumber?: string;
+
+  @ApiPropertyOptional({ description: "Required when payoutMethod is 'bank_transfer'" })
+  @ValidateIf((o: StoreRegisterDto) => o.payoutMethod === 'bank_transfer')
   @IsString()
   @IsNotEmpty()
-  payoutMethod: string;
+  bankName?: string;
 
-  @ApiProperty()
+  @ApiPropertyOptional({ description: "Bank account number or IBAN, required when payoutMethod is 'bank_transfer'" })
+  @ValidateIf((o: StoreRegisterDto) => o.payoutMethod === 'bank_transfer')
   @IsString()
-  @MinLength(10)
-  merchantAccount: string;
+  @MinLength(5)
+  accountNumber?: string;
 }

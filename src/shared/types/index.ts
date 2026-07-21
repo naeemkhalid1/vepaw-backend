@@ -193,7 +193,9 @@ export interface AppointmentResponse {
   paymentAccount: {
     payoutMethod: string | null;
     accountTitle: string | null;
-    mobileAccount: string | null;
+    walletNumber: string | null;
+    bankName: string | null;
+    accountNumber: string | null;
   } | null;
   notes: string | null;
   reviewId: string | null;
@@ -277,6 +279,8 @@ export interface OrderResponse {
   status: string;
   paymentMethod: string;
   paymentStatus: string;
+  paymentReference: string | null;
+  checkoutUrl?: string | null;
   deliveryAddress: {
     street: string;
     area?: string;
@@ -416,6 +420,8 @@ export interface ConsultationSessionResponse {
   vet: string;
   vetName: string;
   amount: number;
+  platformCommission: number;
+  vetPayout: number;
   status:
     | 'pending_payment'
     | 'active'
@@ -439,7 +445,9 @@ export interface ConsultationSessionResponse {
   paymentAccount: {
     payoutMethod: string | null;
     accountTitle: string | null;
-    mobileAccount: string | null;
+    walletNumber: string | null;
+    bankName: string | null;
+    accountNumber: string | null;
   } | null;
   createdAt: Date;
   updatedAt: Date;

@@ -41,11 +41,23 @@ export class Store {
   @Prop({ type: String, default: null })
   businessProof: string | null;
 
-  @Prop({ required: true })
-  payoutMethod: string;
+  @Prop({ required: true, enum: ['jazzcash', 'easypaisa', 'bank_transfer'] })
+  payoutMethod: 'jazzcash' | 'easypaisa' | 'bank_transfer';
 
-  @Prop({ required: true })
-  merchantAccount: string;
+  @Prop({ type: String, default: null })
+  accountTitle: string | null;
+
+  // Wallet number (JazzCash/Easypaisa) — required when payoutMethod is 'jazzcash' or 'easypaisa'.
+  @Prop({ type: String, default: null })
+  walletNumber: string | null;
+
+  // Required when payoutMethod is 'bank_transfer'.
+  @Prop({ type: String, default: null })
+  bankName: string | null;
+
+  // Bank account number or IBAN — required when payoutMethod is 'bank_transfer'.
+  @Prop({ type: String, default: null })
+  accountNumber: string | null;
 
   @Prop({
     type: {

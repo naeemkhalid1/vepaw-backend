@@ -62,7 +62,7 @@ export function toSubscriptionResponse(order: OrderLean): SubscriptionResponse {
   };
 }
 
-export function toOrderResponse(order: OrderLean): OrderResponse {
+export function toOrderResponse(order: OrderLean, checkoutUrl?: string | null): OrderResponse {
   return {
     id: order._id.toString(),
     orderId: order.orderId,
@@ -76,6 +76,8 @@ export function toOrderResponse(order: OrderLean): OrderResponse {
     status: order.status,
     paymentMethod: order.paymentMethod,
     paymentStatus: order.paymentStatus,
+    paymentReference: order.paymentReference,
+    checkoutUrl,
     deliveryAddress: order.deliveryAddress,
     isSubscription: order.isSubscription,
     nextOrderDate: order.nextOrderDate,

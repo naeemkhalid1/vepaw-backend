@@ -28,6 +28,7 @@ import {
   UpdateTransactionStatusDto,
   ResolveConsultationDto,
   ResolveAppointmentDisputeDto,
+  SettlePayoutDto,
 } from './dto/update-status.dto';
 
 // ─── Admin Auth ──────────────────────────────────────
@@ -201,6 +202,29 @@ export class AdminTransactionsController {
     @Body() dto: ResolveAppointmentDisputeDto,
   ) {
     return this.service.resolveDisputedAppointment(id, admin.sub, dto.outcome);
+  }
+}
+
+// ─── Payouts ────────────────────────────────────────────
+
+@ApiTags('admin-payouts')
+@Controller('admin/payouts')
+@ApiBearerAuth()
+@Roles('admin')
+export class AdminPayoutsController {
+  constructor(private readonly service: AdminService) {}
+
+  @Get()
+  @ApiOperation({ summary: 'List payouts, optionally filtered by status' })
+  getPayouts(@Query('status') status?: string) {
+    return this.service.getPayouts(status);
+  }
+
+  @Post(':id/settle')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Mark a payout as settled after the manual bank/wallet transfer is sent' })
+  settlePayout(@CurrentUser() admin: JwtPayload, @Param('id') id: string, @Body() dto: SettlePayoutDto) {
+    return this.service.settlePayout(id, admin.sub, dto.transactionReference);
   }
 }
 

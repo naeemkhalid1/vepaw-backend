@@ -52,3 +52,10 @@ export class ResolveAppointmentDisputeDto {
   @IsIn(['release', 'refund'])
   outcome: 'release' | 'refund';
 }
+
+export class SettlePayoutDto {
+  @ApiPropertyOptional({ description: 'Bank/wallet transaction reference for the manual transfer that was sent' })
+  @IsOptional()
+  @IsString()
+  transactionReference?: string;
+}

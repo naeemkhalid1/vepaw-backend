@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { Model, Types } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import { randomBytes } from 'crypto';
@@ -15,7 +16,12 @@ import { Review, ReviewDocument } from '../../database/schemas/review.schema';
 import { Payout, PayoutDocument } from '../../database/schemas/payout.schema';
 import { Invite, InviteDocument } from '../../database/schemas/invite.schema';
 import { User, UserDocument } from '../../database/schemas/user.schema';
+import {
+  PayoutAccountAudit,
+  PayoutAccountAuditDocument,
+} from '../../database/schemas/payout-account-audit.schema';
 import { ServiceResponse } from '../../shared/types';
+import { payoutMethodLabel, payoutAccountValue, maskPayoutValue } from '../../shared/utils/payout-account.util';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { UpdateStoreSettingsDto } from './dto/update-store-settings.dto';
@@ -78,13 +84,23 @@ export class StorePortalService {
     @InjectModel(Payout.name) private readonly payoutModel: Model<PayoutDocument>,
     @InjectModel(Invite.name) private readonly inviteModel: Model<InviteDocument>,
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
+    @InjectModel(PayoutAccountAudit.name)
+    private readonly payoutAccountAuditModel: Model<PayoutAccountAuditDocument>,
   ) {}
 
   // ─── Orders ──────────────────────────────────────────────
 
+  // A safepay order sitting at paymentStatus:'pending' hasn't actually been paid for yet — same
+  // gate established marketplaces (Shopify, Daraz, Amazon Seller Central) apply before a seller
+  // ever sees or acts on an order. cod orders have no such wait, since there's no advance
+  // payment to confirm.
+  private readonly payableFilter: Record<string, unknown> = {
+    $or: [{ paymentMethod: 'cod' }, { paymentStatus: 'paid' }],
+  };
+
   async getOrders(storeId: string): Promise<ServiceResponse<Record<string, unknown>[]>> {
     const orders = await this.orderModel
-      .find({ store: new Types.ObjectId(storeId), status: { $ne: 'cancelled' } })
+      .find({ store: new Types.ObjectId(storeId), status: { $ne: 'cancelled' }, ...this.payableFilter })
       .sort({ createdAt: -1 })
       .populate('user', 'name area')
       .lean()
@@ -116,13 +132,13 @@ export class StorePortalService {
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
     const [toPack, outToday, monthOrders] = await Promise.all([
-      this.orderModel.countDocuments({ store: sid, status: 'confirmed' }),
+      this.orderModel.countDocuments({ store: sid, status: 'confirmed', ...this.payableFilter }),
       this.orderModel.countDocuments({ store: sid, status: 'dispatched', updatedAt: { $gte: startOfDay } }),
-      this.orderModel.find({ store: sid, createdAt: { $gte: startOfMonth } }).lean().exec(),
+      this.orderModel.find({ store: sid, createdAt: { $gte: startOfMonth }, ...this.payableFilter }).lean().exec(),
     ]);
 
     const oldest = await this.orderModel
-      .findOne({ store: sid, status: 'confirmed' })
+      .findOne({ store: sid, status: 'confirmed', ...this.payableFilter })
       .sort({ createdAt: 1 })
       .lean()
       .exec();
@@ -151,6 +167,21 @@ export class StorePortalService {
   }
 
   async updateOrderStatus(storeId: string, orderId: string, status: string): Promise<ServiceResponse<null>> {
+    const existing = await this.orderModel
+      .findOne({ _id: new Types.ObjectId(orderId), store: new Types.ObjectId(storeId) })
+      .lean()
+      .exec();
+    if (!existing) throw new NotFoundException('Order not found');
+
+    // Mirrors the read-side payableFilter — a store can't act on an order until Safepay
+    // payment is actually confirmed, same gate established marketplaces apply.
+    if (existing.paymentMethod === 'safepay' && existing.paymentStatus !== 'paid') {
+      throw new BadRequestException({
+        message: 'Cannot update order status until payment is confirmed',
+        code: 'PAYMENT_NOT_CONFIRMED',
+      });
+    }
+
     const order = await this.orderModel.findOneAndUpdate(
       { _id: new Types.ObjectId(orderId), store: new Types.ObjectId(storeId) },
       { status },
@@ -421,13 +452,13 @@ export class StorePortalService {
   async getPayoutSummary(storeId: string): Promise<ServiceResponse<Record<string, unknown>>> {
     const sid = new Types.ObjectId(storeId);
     const deliveredOrders = await this.orderModel
-      .find({ store: sid, status: 'delivered', paymentStatus: 'paid' })
+      .find({ store: sid, status: 'delivered', paymentStatus: 'paid', payoutId: null })
       .lean()
       .exec();
 
     const available = deliveredOrders.reduce((sum, o) => sum + o.storePayout, 0);
     const heldOrders = await this.orderModel
-      .find({ store: sid, status: { $in: ['confirmed', 'packed', 'dispatched'] } })
+      .find({ store: sid, status: { $in: ['confirmed', 'packed', 'dispatched'] }, ...this.payableFilter })
       .lean()
       .exec();
     const held = heldOrders.reduce((sum, o) => sum + o.storePayout, 0);
@@ -446,23 +477,110 @@ export class StorePortalService {
     const store = await this.storeModel.findById(storeId).lean().exec();
     if (!store) throw new NotFoundException('Store not found');
 
-    const account = store.merchantAccount ?? '';
+    const account = payoutAccountValue(store);
     const masked = account.length > 4 ? '•••• ' + account.slice(-4) : account;
+    const label = payoutMethodLabel(store.payoutMethod, store.bankName);
 
     return {
       data: {
-        label: store.payoutMethod ?? 'JazzCash',
-        initials: getInitials(store.payoutMethod ?? 'JC'),
+        label,
+        initials: getInitials(label),
         maskedNumber: masked,
-        accountName: store.ownerName,
-        commissionNote: '0% platform commission',
+        accountName: store.accountTitle ?? store.ownerName,
+        commissionNote: 'Platform commission applied',
       },
       message: 'Payout account retrieved',
     };
   }
 
-  async withdraw(storeId: string): Promise<ServiceResponse<{ success: boolean }>> {
-    return { data: { success: true }, message: 'Withdrawal requested' };
+  // Shared by the store-initiated withdraw endpoint and the weekly auto-batch cron below.
+  // Stores are single-entity (no multi-staff clinic-style structure like vets), so this is
+  // simpler than batchPayoutForVet — no cross-staff aggregation needed, just this store's own
+  // unsettled orders. Only delivered+paid orders count toward this batch — payoutId is the
+  // guard against paying the same order out twice. Returns null when there's nothing to batch.
+  private async batchPayoutForStore(
+    storeId: Types.ObjectId,
+    store: Pick<Store, 'payoutMethod' | 'bankName'>,
+    requestedBy: Types.ObjectId | null,
+  ): Promise<{ payoutId: Types.ObjectId; amount: number } | null> {
+    const unsettled = await this.orderModel
+      .find({ store: storeId, status: 'delivered', paymentStatus: 'paid', payoutId: null })
+      .exec();
+
+    const amount = unsettled.reduce((s, o) => s + o.storePayout, 0);
+    if (unsettled.length === 0 || amount <= 0) return null;
+
+    const gross = unsettled.reduce((s, o) => s + o.totalAmount, 0);
+    const commission = unsettled.reduce((s, o) => s + o.platformCommission, 0);
+
+    const payout = await this.payoutModel.create({
+      entityId: storeId,
+      entityType: 'store',
+      label: `Payout — ${unsettled.length} order${unsettled.length === 1 ? '' : 's'}`,
+      date: new Date().toISOString().slice(0, 10),
+      method: payoutMethodLabel(store.payoutMethod, store.bankName),
+      orders: unsettled.length,
+      gross,
+      commission,
+      netPaid: amount,
+      amount,
+      status: 'pending',
+      requestedBy,
+    });
+
+    await this.orderModel
+      .updateMany({ _id: { $in: unsettled.map((o) => o._id) } }, { $set: { payoutId: payout._id } })
+      .exec();
+
+    return { payoutId: payout._id, amount };
+  }
+
+  async withdraw(storeId: string): Promise<ServiceResponse<{ payoutId: string; amount: number }>> {
+    const sid = new Types.ObjectId(storeId);
+    const store = await this.storeModel.findById(sid).lean().exec();
+    if (!store) throw new NotFoundException('Store not found');
+    if (!store.payoutMethod) {
+      throw new BadRequestException({
+        message: 'Set up a payout account before requesting a withdrawal',
+        code: 'PAYOUT_ACCOUNT_NOT_SET',
+      });
+    }
+
+    const result = await this.batchPayoutForStore(sid, store, sid);
+    if (!result) {
+      throw new BadRequestException({
+        message: 'No available balance to withdraw',
+        code: 'NO_BALANCE_AVAILABLE',
+      });
+    }
+
+    return {
+      data: { payoutId: result.payoutId.toString(), amount: result.amount },
+      message: 'Withdrawal requested — pending admin settlement',
+    };
+  }
+
+  // Runs every Monday at 00:00 Asia/Karachi, same window as the vet auto-batch cron.
+  @Cron('0 0 * * 1', { timeZone: 'Asia/Karachi' })
+  async autoBatchWeeklyStorePayouts(): Promise<void> {
+    const storeIdsWithBalance = await this.orderModel.distinct('store', {
+      status: 'delivered',
+      paymentStatus: 'paid',
+      payoutId: null,
+    });
+
+    let batched = 0;
+    for (const storeId of storeIdsWithBalance as Types.ObjectId[]) {
+      const store = await this.storeModel.findById(storeId).select('payoutMethod bankName').lean().exec();
+      if (!store?.payoutMethod) continue; // no payout account set up yet — skip until they add one
+
+      const result = await this.batchPayoutForStore(storeId, store, null);
+      if (result) batched++;
+    }
+
+    if (batched > 0) {
+      this.logger.log(`Weekly auto-batch: created ${batched} store payout(s)`);
+    }
   }
 
   // ─── Reviews ────────────────────────────────────────────
@@ -615,12 +733,8 @@ export class StorePortalService {
     const store = await this.storeModel.findById(storeId).lean().exec();
     if (!store) throw new NotFoundException('Store not found');
 
-    const account = store.merchantAccount ?? '';
-    const masked = account.length > 4 ? '•••• ' + account.slice(-4) : account;
-
-    const maskedPhone = account.length >= 7
-      ? account.slice(0, 4) + ' *** ' + account.slice(-4)
-      : account;
+    const masked = maskPayoutValue(store);
+    const label = payoutMethodLabel(store.payoutMethod, store.bankName);
 
     return {
       data: {
@@ -643,11 +757,13 @@ export class StorePortalService {
           closes: store.businessHours?.closes ?? '21:00',
         },
         payout: {
-          label: store.payoutMethod ?? 'JazzCash',
-          initials: (store.payoutMethod ?? 'JazzCash').split(/(?=[A-Z])/).map((w: string) => w[0]).join('').toUpperCase(),
-          maskedNumber: maskedPhone,
-          subtitle: store.ownerName,
-          warning: 'Commission: 12% per order, deducted before payout.',
+          method: store.payoutMethod,
+          label,
+          initials: getInitials(label),
+          bankName: store.bankName ?? null,
+          maskedNumber: masked,
+          subtitle: store.accountTitle ?? store.ownerName,
+          warning: 'Commission: 10% per order, deducted before payout.',
         },
       },
       message: 'Settings retrieved',
@@ -697,6 +813,7 @@ export class StorePortalService {
     const existing = await this.storeModel.findOne({ phone: dto.phone }).lean().exec();
     if (existing) throw new BadRequestException('A store with this phone already exists');
 
+    const isBank = dto.payoutMethod === 'bank_transfer';
     await this.storeModel.create({
       storeName: dto.storeName,
       ownerName: dto.ownerName,
@@ -706,7 +823,10 @@ export class StorePortalService {
       ownerCnic: dto.ownerCnic,
       businessProof: dto.businessProof?.name ?? null,
       payoutMethod: dto.payoutMethod,
-      merchantAccount: dto.merchantAccount,
+      accountTitle: dto.accountTitle ?? dto.ownerName,
+      walletNumber: isBank ? null : (dto.walletNumber ?? null),
+      bankName: isBank ? (dto.bankName ?? null) : null,
+      accountNumber: isBank ? (dto.accountNumber ?? null) : null,
       status: 'pending',
     });
 
@@ -780,8 +900,112 @@ export class StorePortalService {
     return { data: null, message: `Member ${status}` };
   }
 
-  async updatePayoutAccount(storeId: string, accountNumber: string): Promise<ServiceResponse<null>> {
-    await this.storeModel.findByIdAndUpdate(storeId, { merchantAccount: accountNumber }).exec();
+  async updatePayoutAccount(storeId: string, dto: UpdatePayoutAccountDto): Promise<ServiceResponse<null>> {
+    const sid = new Types.ObjectId(storeId);
+    const previous = await this.storeModel.findById(sid).lean().exec();
+    if (!previous) throw new NotFoundException('Store not found');
+
+    const isBank = dto.method === 'bank_transfer';
+    const nextValues = {
+      payoutMethod: dto.method,
+      accountTitle: dto.accountTitle,
+      walletNumber: isBank ? null : (dto.walletNumber ?? null),
+      bankName: isBank ? (dto.bankName ?? null) : null,
+      accountNumber: isBank ? (dto.accountNumber ?? null) : null,
+    };
+    await this.storeModel.findByIdAndUpdate(sid, nextValues).exec();
+
+    // One immutable audit entry per change — who, from what, to what. Shared schema with
+    // vet-portal's payout-account trail (entityType distinguishes which).
+    await this.payoutAccountAuditModel.create({
+      entityId: sid,
+      entityType: 'store',
+      changedBy: sid,
+      changedByName: previous.ownerName,
+      changedByRole: null,
+      previousValues: {
+        payoutMethod: previous.payoutMethod,
+        accountTitle: previous.accountTitle,
+        walletNumber: previous.walletNumber,
+        bankName: previous.bankName,
+        accountNumber: previous.accountNumber,
+      },
+      newValues: nextValues,
+    });
+
     return { data: null, message: 'Payout account submitted for verification' };
+  }
+
+  async getPayoutAccountHistory(storeId: string): Promise<ServiceResponse<Record<string, unknown>[]>> {
+    const entries = await this.payoutAccountAuditModel
+      .find({ entityId: new Types.ObjectId(storeId), entityType: 'store' })
+      .sort({ createdAt: -1 })
+      .lean()
+      .exec();
+
+    return {
+      data: entries.map((e) => ({
+        id: e._id.toString(),
+        changedByName: e.changedByName,
+        previousMethod: e.previousValues ? payoutMethodLabel(e.previousValues.payoutMethod, e.previousValues.bankName) : null,
+        previousMasked: e.previousValues ? maskPayoutValue(e.previousValues) : null,
+        newMethod: payoutMethodLabel(e.newValues.payoutMethod, e.newValues.bankName),
+        newMasked: maskPayoutValue(e.newValues),
+        changedAt: e.createdAt,
+      })),
+      message: 'Payout account history retrieved',
+    };
+  }
+
+  // Merges the payout-account audit trail with the payout lifecycle (requested → settled) into
+  // one chronological feed, same pattern as the vet-portal equivalent. Stores are single-entity
+  // (no staff to resolve), so "actor" is always just the store's own owner name when set.
+  async getPayoutActivity(storeId: string): Promise<ServiceResponse<Record<string, unknown>[]>> {
+    const sid = new Types.ObjectId(storeId);
+    const store = await this.storeModel.findById(sid).lean().exec();
+    if (!store) throw new NotFoundException('Store not found');
+
+    const [accountChanges, payouts] = await Promise.all([
+      this.payoutAccountAuditModel.find({ entityId: sid, entityType: 'store' }).lean().exec(),
+      this.payoutModel.find({ entityId: sid, entityType: 'store' }).lean().exec(),
+    ]);
+
+    const events: { id: string; type: string; summary: string; actor: string | null; occurredAt: Date }[] = [];
+
+    for (const e of accountChanges) {
+      events.push({
+        id: e._id.toString(),
+        type: 'account_updated',
+        summary: e.previousValues
+          ? `Payout account changed from ${payoutMethodLabel(e.previousValues.payoutMethod, e.previousValues.bankName)} to ${payoutMethodLabel(e.newValues.payoutMethod, e.newValues.bankName)}`
+          : `Payout account set up (${payoutMethodLabel(e.newValues.payoutMethod, e.newValues.bankName)})`,
+        actor: e.changedByName,
+        occurredAt: e.createdAt,
+      });
+    }
+
+    for (const p of payouts) {
+      events.push({
+        id: `${p._id.toString()}-requested`,
+        type: 'payout_requested',
+        summary: `Payout requested — PKR ${p.amount.toLocaleString()} (${p.orders} order${p.orders === 1 ? '' : 's'})`,
+        actor: p.requestedBy ? store.ownerName : 'Weekly auto-batch',
+        occurredAt: p.createdAt,
+      });
+
+      if (p.status === 'completed' && p.settledAt) {
+        events.push({
+          id: `${p._id.toString()}-settled`,
+          type: 'payout_settled',
+          summary: `Payout settled — PKR ${p.amount.toLocaleString()}${p.transactionReference ? ` (ref: ${p.transactionReference})` : ''}`,
+          actor: null, // settled by an admin, not the store — resolved via admin.service.ts's own getPayouts if needed
+          occurredAt: p.settledAt,
+        });
+      }
+    }
+
+    events.sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime());
+
+    return { data: events, message: 'Payout activity retrieved' };
   }
 }

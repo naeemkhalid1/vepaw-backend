@@ -9,10 +9,10 @@
 [React Native App] ─┐
 [Vet Dashboard]      ├─ REST API ──> [NestJS App Server] ──> [MongoDB]
 [Store Dashboard]    │                      │
-[Admin Panel]    ────┘                      ├──> [Redis] (cache, OTP, sessions, BullMQ, Socket.io adapter)
+[Admin Panel]    ────┘                      ├──> [Redis] (cache, OTP, sessions, Socket.io adapter)
                                              ├──> [Socket.io Gateway] (live location, chat, call signaling)
-                                             ├──> [BullMQ Workers] (cron jobs, notifications, PDF gen)
-                                             └──> External: FCM, JazzCash/Easypaisa, Google Maps, LLM API, Video SDK (Agora)
+                                             ├──> [In-process @Cron jobs] (see §5 — no separate worker/queue)
+                                             └──> External: FCM (not wired), Safepay, Google Maps, LLM API, Video SDK (Agora)
 ```
 
 Key principle: the API layer is **stateless**. No session data lives in server memory — everything that needs to persist across requests lives in MongoDB or Redis. This is what lets you run multiple server instances later without rewriting anything.
@@ -50,7 +50,7 @@ src/
 │   ├── notifications/          # FCM integration
 │   ├── admin/
 │   └── realtime/                # Socket.io gateways (location, chat, calls)
-├── jobs/                          # BullMQ processors (cron-style tasks)
+├── jobs/                          # orphaned leftovers from the original BullMQ design — see §5, not wired to anything
 └── shared/                          # types/interfaces shared across modules
 ```
 
@@ -76,14 +76,14 @@ Each feature module follows the same internal shape: `*.controller.ts`, `*.servi
 
 ---
 
-## 5. Background Jobs (BullMQ + Redis)
+## 5. Background Jobs
 
-Run these as a **separate worker process**, not inline in the API process, so a slow job never blocks API responsiveness:
-- Vaccination status auto-update (daily cron)
-- Vaccination-due-in-7-days reminder push (daily cron)
-- FCM push dispatch (queued, not sent inline on the request thread)
-- Pet passport PDF generation (queued — PDF generation is slow, never do it synchronously in a request handler)
-- Payment webhook post-processing (commission calc, payout ledger entries)
+**Note (2026-07-21): this section describes the original design intent (a separate BullMQ worker process). That was never kept — the codebase now runs scheduled work in-process via `@nestjs/schedule` `@Cron` decorators directly on domain services.** No queue/worker process exists; `src/jobs/*.processor.ts` are orphaned leftovers from the original design, referenced nowhere. Jobs actually running today:
+- `AppointmentsService.markStaleAppointmentsNoShow()` / `releaseEligiblePayouts()` — hourly
+- `ConsultationsService.expireStaleConsultations()` — hourly
+- `VetPortalService.autoBatchWeeklyPayouts()` — every Monday 00:00 Asia/Karachi (pinned via `@Cron(..., { timeZone: 'Asia/Karachi' })`) — auto-creates a pending `Payout` for every clinic with a released, unpaid balance
+
+Still not implemented anywhere: vaccination status auto-update, vaccination-due-in-7-days reminder push, FCM push dispatch (no `firebase-admin` dependency exists), pet passport PDF generation.
 
 ---
 
@@ -131,7 +131,7 @@ Always pair this with the Redis adapter (see §4) from day one, even with one se
 ## 10. Scalability Path (grow into this, don't over-build day one)
 
 1. **Now:** single NestJS instance + single worker process + MongoDB Atlas (shared tier) + Redis Cloud (free tier). Fully sufficient for early traction.
-2. **Next:** split API and BullMQ worker into separate deployable services (already structured that way from §5, so this is just a deployment change, not a code change).
+2. **Next:** ~~split API and BullMQ worker into separate deployable services~~ — no longer applicable; scheduled work runs in-process via `@nestjs/schedule` (see §5). Revisit only if in-process cron jobs start competing meaningfully with request traffic.
 3. **Then:** horizontal scale the API behind a load balancer once concurrent users justify it — works immediately because the API is stateless and Socket.io already has the Redis adapter wired in.
 4. **Later:** dedicated read replica for MongoDB if dashboard analytics queries start competing with live traffic.
 

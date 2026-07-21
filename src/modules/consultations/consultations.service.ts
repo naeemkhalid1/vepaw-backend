@@ -46,6 +46,22 @@ const ACTIVE_OR_PENDING_STATUSES = [
   'disputed',
 ] as const;
 
+// Confirmed 2026-07-21: percentage-based (10%, same rate as appointments) — a launch-phase
+// rate kept deliberately low to attract initial vets, expected to increase later. Separate
+// from Safepay's own processing fee, which is taken on their side during settlement and never
+// touches this number or the vet's payout. Move to ConfigService/commission tiers when wired up.
+const CONSULTATION_COMMISSION_RATE = 0.1;
+
+// How long a session can sit in pending_payment (owner opened Safepay checkout but never
+// completed or explicitly cancelled it) before we give up on it — same window appointments use
+// for their equivalent case (RESERVATION_TTL_MINUTES). Swept on the same hourly cadence as
+// expireStaleConsultations rather than a hard TTL, since a ConsultationSession is the persistent
+// record itself (not a disposable reservation like AppointmentReservation) — an abandoned
+// checkout can sit up to ~75 minutes (15min + up to 60min until the next tick) before cleanup,
+// acceptable since the only cost is blocking a new consultation with the same vet in the
+// meantime, not a real resource lock.
+const PENDING_PAYMENT_TIMEOUT_MINUTES = 15;
+
 @Injectable()
 export class ConsultationsService {
   private readonly logger = new Logger(ConsultationsService.name);
@@ -155,6 +171,9 @@ export class ConsultationsService {
       thread = created.toObject();
     }
 
+    const platformCommission = Math.round(vet.textConsultFee * CONSULTATION_COMMISSION_RATE);
+    const vetPayout = vet.textConsultFee - platformCommission;
+
     const session = await this.consultationModel.create({
       owner: ownerObjectId,
       pet: petObjectId,
@@ -162,6 +181,8 @@ export class ConsultationsService {
       clinicId: vet.clinicId ?? null,
       thread: thread._id,
       amount: vet.textConsultFee,
+      platformCommission,
+      vetPayout,
       status: 'pending_payment',
     });
 
@@ -306,6 +327,40 @@ export class ConsultationsService {
     if (stale.length > 0) {
       this.logger.log(
         `Auto-expired ${stale.length} stale consultation session(s)`,
+      );
+    }
+  }
+
+  // Owner opened Safepay checkout and never completed, failed, or explicitly cancelled it —
+  // without this, createConsultation's CONSULTATION_ALREADY_IN_PROGRESS check would permanently
+  // block the owner from starting a new consultation with this vet.
+  @Cron(CronExpression.EVERY_HOUR)
+  async cancelAbandonedPendingPaymentConsultations(): Promise<void> {
+    const cutoff = new Date(
+      Date.now() - PENDING_PAYMENT_TIMEOUT_MINUTES * 60 * 1000,
+    );
+    const stale = await this.consultationModel
+      .find({ status: 'pending_payment', createdAt: { $lt: cutoff } })
+      .exec();
+
+    for (const session of stale) {
+      session.status = 'cancelled';
+      session.closedBy = 'system';
+      session.closedAt = new Date();
+      await session.save();
+
+      await this.postStatusMessage(
+        session,
+        session.thread as Types.ObjectId,
+        'doctor',
+        'cancelled',
+        'Payment window expired — consultation cancelled',
+      );
+    }
+
+    if (stale.length > 0) {
+      this.logger.log(
+        `Cancelled ${stale.length} abandoned pending-payment consultation session(s)`,
       );
     }
   }

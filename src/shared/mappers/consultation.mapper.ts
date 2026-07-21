@@ -14,7 +14,7 @@ export function toConsultationSessionResponse(
   petName: string,
   vetName: string,
   ownerName: string,
-  clinic?: Pick<Clinic, 'payoutMethod' | 'accountTitle' | 'mobileAccount'> | null,
+  clinic?: Pick<Clinic, 'payoutMethod' | 'accountTitle' | 'walletNumber' | 'bankName' | 'accountNumber'> | null,
   checkoutUrl?: string | null,
 ): ConsultationSessionResponse {
   return {
@@ -26,6 +26,8 @@ export function toConsultationSessionResponse(
     vet: (s.vet as Types.ObjectId).toString(),
     vetName,
     amount: s.amount,
+    platformCommission: s.platformCommission,
+    vetPayout: s.vetPayout,
     status: s.status,
     paymentReference: s.paymentReference,
     checkoutUrl,
@@ -44,7 +46,9 @@ export function toConsultationSessionResponse(
       ? {
           payoutMethod: clinic.payoutMethod,
           accountTitle: clinic.accountTitle,
-          mobileAccount: clinic.mobileAccount,
+          walletNumber: clinic.walletNumber,
+          bankName: clinic.bankName,
+          accountNumber: clinic.accountNumber,
         }
       : null,
     createdAt: s.createdAt,

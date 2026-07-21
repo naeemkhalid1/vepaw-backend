@@ -10,7 +10,7 @@ export class CreateSubscriptionDto {
   @IsIn(['weekly', 'biweekly', 'monthly', 'quarterly'])
   interval: 'weekly' | 'biweekly' | 'monthly' | 'quarterly';
 
-  @ApiProperty({ enum: ['jazzcash', 'easypaisa', 'cod'], description: 'Billing intent for this subscription' })
-  @IsIn(['jazzcash', 'easypaisa', 'cod'])
-  paymentMethod: 'jazzcash' | 'easypaisa' | 'cod';
+  @ApiProperty({ enum: ['safepay', 'cod'], description: 'Billing intent for this subscription' })
+  @IsIn(['safepay', 'cod'])
+  paymentMethod: 'safepay' | 'cod';
 }

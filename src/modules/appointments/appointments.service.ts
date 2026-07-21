@@ -55,8 +55,12 @@ import { ClinicTeamService } from '../../common/vets/clinic-team.service';
 import { SafepayService } from '../../common/payments/safepay.service';
 import { NotificationsService } from '../notifications/notifications.service';
 
-// Configurable platform commission — move to ConfigService when fee tiers are introduced
-const PLATFORM_COMMISSION_PKR = 150;
+// Confirmed 2026-07-21: percentage-based (10%), not a flat PKR amount — same rate as paid
+// consultations. This is a launch-phase rate, deliberately kept low to attract initial vets;
+// expected to increase later. Separate from whatever Safepay's own processing fee takes —
+// that happens on Safepay's side during settlement and never touches this number or the vet's
+// payout. Move to ConfigService when fee tiers are introduced.
+const PLATFORM_COMMISSION_RATE = 0.1;
 
 // How long past the scheduled time an unresolved appointment is treated as a no-show
 const NO_SHOW_GRACE_MS = 2 * 60 * 60 * 1000;
@@ -215,7 +219,7 @@ export class AppointmentsService {
     }
 
     const fee = dto.fee;
-    const platformCommission = PLATFORM_COMMISSION_PKR;
+    const platformCommission = Math.round(fee * PLATFORM_COMMISSION_RATE);
     const vetPayout = fee - platformCommission;
 
     const appointment = await this.appointmentModel.create({
@@ -316,7 +320,7 @@ export class AppointmentsService {
     }
 
     const fee = dto.fee;
-    const platformCommission = PLATFORM_COMMISSION_PKR;
+    const platformCommission = Math.round(fee * PLATFORM_COMMISSION_RATE);
     const vetPayout = fee - platformCommission;
     const expiresAt = new Date(
       Date.now() + RESERVATION_TTL_MINUTES * 60 * 1000,

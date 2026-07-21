@@ -1,4 +1,4 @@
-import { IsArray, IsBoolean, IsNotEmpty, IsNumber, IsObject, IsOptional, IsString, ValidateNested } from 'class-validator';
+import { IsArray, IsBoolean, IsIn, IsNotEmpty, IsNumber, IsObject, IsOptional, IsString, Matches, MinLength, ValidateIf, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -30,9 +30,25 @@ class AvailabilitySettingsDto {
 }
 
 class PayoutInfoDto {
-  @IsString() method: string;
+  @IsIn(['jazzcash', 'easypaisa', 'bank_transfer']) method: 'jazzcash' | 'easypaisa' | 'bank_transfer';
   @IsOptional() @IsString() methodInitials?: string;
   @IsString() accountHolder: string;
+
+  @ValidateIf((o: PayoutInfoDto) => o.method === 'jazzcash' || o.method === 'easypaisa')
+  @IsString()
+  @Matches(/^03\d{9}$/, { message: 'walletNumber must be an 11-digit Pakistani mobile number (e.g. 03001234567)' })
+  walletNumber?: string;
+
+  @ValidateIf((o: PayoutInfoDto) => o.method === 'bank_transfer')
+  @IsString()
+  @IsNotEmpty()
+  bankName?: string;
+
+  @ValidateIf((o: PayoutInfoDto) => o.method === 'bank_transfer')
+  @IsString()
+  @MinLength(5)
+  accountNumber?: string;
+
   @IsOptional() @IsString() maskedNumber?: string;
   @IsOptional() @IsString() commissionRate?: string;
   @IsOptional() @IsString() commissionLabel?: string;

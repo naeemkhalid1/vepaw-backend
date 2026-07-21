@@ -71,14 +71,20 @@ export class VetApplication {
   @Prop({ type: String, default: null })
   clinicPhoto: string | null;
 
-  @Prop({ required: true })
-  payoutMethod: string;
+  @Prop({ required: true, enum: ['jazzcash', 'easypaisa', 'bank_transfer'] })
+  payoutMethod: 'jazzcash' | 'easypaisa' | 'bank_transfer';
 
   @Prop({ required: true })
   accountTitle: string;
 
-  @Prop({ required: true })
-  mobileAccount: string;
+  @Prop({ type: String, default: null })
+  walletNumber: string | null;
+
+  @Prop({ type: String, default: null })
+  bankName: string | null;
+
+  @Prop({ type: String, default: null })
+  accountNumber: string | null;
 
   @Prop({ required: true })
   cnicOnAccount: string;

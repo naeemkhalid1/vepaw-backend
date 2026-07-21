@@ -1,5 +1,7 @@
-import { BadRequestException, Injectable, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
+import { ConfigService } from '@nestjs/config';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { Model, Types } from 'mongoose';
 import { randomInt } from 'crypto';
 import { Product, ProductDocument } from '../../database/schemas/product.schema';
@@ -13,6 +15,12 @@ import { ListOrdersDto } from './dto/list-orders.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { CreateSubscriptionDto } from '../subscriptions/dto/create-subscription.dto';
 import { UpdateSubscriptionDto } from '../subscriptions/dto/update-subscription.dto';
+import { SafepayService } from '../../common/payments/safepay.service';
+import {
+  SafepayWebhookEvent,
+  extractOrderId,
+  extractAmount,
+} from '../../common/payments/safepay-webhook-event.interface';
 
 const TERMINAL_STATUSES = new Set(['delivered', 'cancelled']);
 
@@ -23,12 +31,26 @@ const INTERVAL_DAYS: Record<'weekly' | 'biweekly' | 'monthly' | 'quarterly', num
   quarterly: 90,
 };
 
+// Confirmed 2026-07-21: percentage-based (10%, same launch-phase rate as appointments and
+// consultations) — replaces the previous hardcoded 0% (stores kept 100% of order value).
+// Separate from Safepay's own processing fee, taken on their side during settlement.
+const STORE_COMMISSION_RATE = 0.1;
+
+// Same window used for appointment reservations / consultation pending-payment sessions — how
+// long a safepay order can sit unpaid (owner opened checkout, never completed or failed it)
+// before we give up and cancel it, so it doesn't sit in the order list forever.
+const ORDER_PENDING_PAYMENT_TIMEOUT_MINUTES = 15;
+
 @Injectable()
 export class StoreService {
+  private readonly logger = new Logger(StoreService.name);
+
   constructor(
     @InjectModel(Product.name) private readonly productModel: Model<ProductDocument>,
     @InjectModel(Order.name) private readonly orderModel: Model<OrderDocument>,
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
+    private readonly safepayService: SafepayService,
+    private readonly config: ConfigService,
   ) {}
 
   async listProducts(dto: ListProductsDto): Promise<ServiceResponse<ProductResponse[]>> {
@@ -126,23 +148,41 @@ export class StoreService {
 
     const store = products[0].store;
     const storeName = products[0].storeName;
-    const orderId = `PC-${randomInt(100000, 999999)}`;
+    const humanOrderId = `PC-${randomInt(100000, 999999)}`;
+
+    const platformCommission = Math.round(serverTotal * STORE_COMMISSION_RATE);
+    const storePayout = serverTotal - platformCommission;
 
     const order = await this.orderModel.create({
-      orderId,
+      orderId: humanOrderId,
       user: userId,
       store,
       storeName,
       items: orderItems,
       totalAmount: serverTotal,
-      platformCommission: 0,
-      storePayout: serverTotal,
+      platformCommission,
+      storePayout,
       paymentMethod: dto.paymentMethod,
       deliveryAddress: dto.deliveryAddress,
     });
 
+    let checkoutUrl: string | null = null;
+    if (dto.paymentMethod === 'safepay') {
+      const orderObjectId = order._id.toString();
+      const frontendBaseUrl = this.config.getOrThrow<string>('FRONTEND_BASE_URL');
+      const session = await this.safepayService.createCheckoutSession(
+        serverTotal,
+        orderObjectId,
+        `${frontendBaseUrl}/callback?type=order&id=${orderObjectId}&result=success`,
+        `${frontendBaseUrl}/callback?type=order&id=${orderObjectId}&result=cancelled`,
+      );
+      order.paymentReference = session.trackerToken;
+      await order.save();
+      checkoutUrl = session.checkoutUrl;
+    }
+
     return {
-      data: toOrderResponse(order.toObject() as Parameters<typeof toOrderResponse>[0]),
+      data: toOrderResponse(order.toObject() as Parameters<typeof toOrderResponse>[0], checkoutUrl),
       message: 'Order placed successfully',
     };
   }
@@ -185,6 +225,12 @@ export class StoreService {
       throw new UnprocessableEntityException({ code: 'ORDER_TERMINAL', message: 'Order is already in a terminal state' });
     }
 
+    // Same gate established marketplaces apply before a seller can act on an order — a safepay
+    // order that hasn't actually been paid for yet can't be advanced through fulfillment.
+    if (order.paymentMethod === 'safepay' && order.paymentStatus !== 'paid') {
+      throw new BadRequestException({ code: 'PAYMENT_NOT_CONFIRMED', message: 'Cannot update order status until payment is confirmed' });
+    }
+
     if (dto.status === 'dispatched' && !dto.rider) {
       throw new BadRequestException({ code: 'RIDER_REQUIRED', message: 'Rider details are required when dispatching an order' });
     }
@@ -218,7 +264,13 @@ export class StoreService {
     const qty = 1;
     const unitPrice = product.price;
     const orderId = `PC-${randomInt(100000, 999999)}`;
+    const totalAmount = unitPrice * qty;
+    const platformCommission = Math.round(totalAmount * STORE_COMMISSION_RATE);
+    const storePayout = totalAmount - platformCommission;
 
+    // Note: no recurring billing engine exists yet — this only creates the first cycle's Order
+    // record with status 'active'; nothing here calls Safepay to actually charge on an ongoing
+    // basis. paymentMethod is stored for when that engine exists, but has no effect today.
     const order = await this.orderModel.create({
       orderId,
       user: userId,
@@ -232,9 +284,9 @@ export class StoreService {
         qty,
         price: unitPrice,
       }],
-      totalAmount: unitPrice * qty,
-      platformCommission: 0,
-      storePayout: unitPrice * qty,
+      totalAmount,
+      platformCommission,
+      storePayout,
       status: 'active',
       paymentMethod: dto.paymentMethod,
       deliveryAddress: {
@@ -303,5 +355,83 @@ export class StoreService {
     const next = new Date();
     next.setDate(next.getDate() + INTERVAL_DAYS[interval]);
     return next.toISOString();
+  }
+
+  // Idempotent — matches on current paymentStatus so a replayed webhook is a no-op. Never
+  // throws: Safepay expects a 2xx ack within 10s regardless of whether the order was recognized.
+  async handleSafepayEvent(event: SafepayWebhookEvent): Promise<void> {
+    const orderId = extractOrderId(event);
+    if (!orderId || !Types.ObjectId.isValid(orderId)) {
+      this.logger.warn(`Safepay webhook missing/invalid order_id: ${JSON.stringify(event)}`);
+      return;
+    }
+    const orderObjectId = new Types.ObjectId(orderId);
+
+    if (event.type === 'payment.succeeded') {
+      const order = await this.orderModel.findById(orderObjectId).lean().exec();
+      if (!order || order.paymentStatus !== 'pending') {
+        this.logger.warn(`Safepay payment.succeeded: no matching pending order for ${orderId}`);
+        return;
+      }
+
+      const paidAmount = extractAmount(event);
+      if (paidAmount !== undefined && paidAmount !== order.totalAmount) {
+        this.logger.error(
+          `Safepay payment.succeeded: amount mismatch for order ${orderId} — expected ${order.totalAmount}, got ${paidAmount}. Not marking paid.`,
+        );
+        return;
+      }
+
+      const updated = await this.orderModel
+        .findOneAndUpdate(
+          { _id: orderObjectId, paymentStatus: 'pending' },
+          { $set: { paymentStatus: 'paid' } },
+          { new: true },
+        )
+        .exec();
+      if (!updated) {
+        this.logger.warn(`Safepay payment.succeeded: order ${orderId} already processed by a concurrent webhook delivery`);
+      }
+      return;
+    }
+
+    if (event.type === 'payment.failed') {
+      const updated = await this.orderModel
+        .findOneAndUpdate(
+          { _id: orderObjectId, paymentStatus: 'pending' },
+          { $set: { status: 'cancelled' } },
+          { new: true },
+        )
+        .exec();
+      if (!updated) {
+        this.logger.warn(`Safepay payment.failed: no matching pending order for ${orderId}`);
+      }
+      return;
+    }
+
+    this.logger.log(`Ignoring unhandled Safepay event type: ${event.type}`);
+  }
+
+  // Owner opened Safepay checkout and never completed, failed, or explicitly cancelled it —
+  // same abandoned-checkout cleanup pattern as appointments/consultations, so a stale order
+  // doesn't sit in the customer's order list forever.
+  @Cron(CronExpression.EVERY_HOUR)
+  async cancelAbandonedPendingPaymentOrders(): Promise<void> {
+    const cutoff = new Date(Date.now() - ORDER_PENDING_PAYMENT_TIMEOUT_MINUTES * 60 * 1000);
+    const result = await this.orderModel
+      .updateMany(
+        {
+          paymentMethod: 'safepay',
+          paymentStatus: 'pending',
+          status: 'pending',
+          createdAt: { $lt: cutoff },
+        },
+        { $set: { status: 'cancelled' } },
+      )
+      .exec();
+
+    if (result.modifiedCount > 0) {
+      this.logger.log(`Cancelled ${result.modifiedCount} abandoned pending-payment order(s)`);
+    }
   }
 }

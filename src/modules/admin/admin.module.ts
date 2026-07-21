@@ -14,6 +14,7 @@ import {
   AdminCommissionsController,
   AdminBroadcastsController,
   AdminReportsController,
+  AdminPayoutsController,
 } from './admin.controller';
 import { Vet, VetSchema } from '../../database/schemas/vet.schema';
 import { Clinic, ClinicSchema } from '../../database/schemas/clinic.schema';
@@ -72,6 +73,7 @@ import { RealtimeModule } from '../realtime/realtime.module';
     AdminCommissionsController,
     AdminBroadcastsController,
     AdminReportsController,
+    AdminPayoutsController,
   ],
   providers: [AdminService],
   exports: [AdminService],

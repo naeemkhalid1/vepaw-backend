@@ -35,7 +35,7 @@ No screenshot, no `payment_submitted`/`paid` — those are skipped entirely. Vet
 ```
 requested → confirmed → payment_submitted → paid → dispensed → (completed)
 ```
-1. Vet confirms — response includes the vet's payment details (reuse existing `Vet.mobileAccount` / `payoutMethod` / `accountTitle`, already used for platform payouts — no new account field needed).
+1. Vet confirms — response includes the vet's payment details (reuse existing `Clinic.walletNumber` / `bankName` / `accountNumber` / `payoutMethod` / `accountTitle` — as of 2026-07-21 these replaced the old single `Clinic.mobileAccount` field, see §3 below — already used for platform payouts, no new account field needed).
 2. Owner sends money themselves (outside the app), uploads a screenshot as proof → `POST /clinic-requests/:id/submit-payment` (multipart, reuse `S3Service`/`imageUploadOptions`). Stores `paymentProofUrl` + `paymentSubmittedAt`.
 3. Vet checks their own account, confirms money landed, marks verified → `POST /vet/requests/:id/mark-paid`. Stores `paidAt`, sets `paymentMethod = advance`.
 4. Vet dispenses at pickup — no further payment needed.
@@ -80,3 +80,27 @@ Scenario 1: should picking `paymentMethod` be **required** on every "Dispense" a
 **Not yet decided:** Whether to also auto-flag requests that sit in `confirmed` too long (e.g. "overdue" after N days) — deferred, needs a product call on timing.
 
 This item is superseded/absorbed by item 1 above once that's built (item 1's widened decline/cancel already covers this).
+
+---
+
+## 3. Vet payout — automated disbursement (deferred, intentionally)
+
+**Context:** As of 2026-07-21 the entire vet payout *system* is built and production-ready: `Clinic` stores a validated payout account (`payoutMethod: 'jazzcash' | 'easypaisa' | 'bank_transfer'` + `walletNumber`/`bankName`+`accountNumber` + `accountTitle`, all conditionally validated in the DTOs); only `admin_vet`/`manager` can view or trigger a clinic's payouts (`@ClinicRoles` on `VetPayoutsController` and the payout-account endpoints in `VetClinicSettingsController`, enforced by the existing global `ClinicRolesGuard`); a real `Payout` ledger record is created either by a vet clicking "withdraw" (`vetWithdraw()`) or automatically every Monday 00:00 Asia/Karachi (`VetPortalService.autoBatchWeeklyPayouts()`, aggregated per-clinic via `resolveClinicVetIds()` so multi-staff clinics get one combined batch, not one per staff member); admin sees a real pending-payouts queue (`GET /admin/payouts?status=`) and manually confirms the transfer was sent (`POST /admin/payouts/:id/settle`); every payout-account change and every payout requested/settled event is captured in `PayoutAccountAudit` and surfaced as one merged timeline (`GET /vet/clinic-settings/payout/activity`).
+
+**Gap — the one deliberately unfinished piece:** step "money actually leaves the platform's account and lands in the vet's JazzCash/bank account" is still a **manual, human action** by the admin, done outside the app, before they click "mark as settled." Neither Safepay (confirmed via their SDK + public docs — no payout/disbursement product exists) nor this codebase can move money out automatically today.
+
+**Decision:** deliberately deferred rather than half-built against undocumented APIs — do not start the code integration below until the account/credentials exist.
+
+### What has to happen first (outside this codebase)
+1. Open a **corporate account** with JazzCash or EasyPaisa (their "Corporate Disbursement Solutions" product — separate from the personal-wallet or collection-side products) — requires business registration docs, NTN, a company bank account; typically a days-to-weeks onboarding with their business team.
+2. Get **disbursement API credentials** (merchant/corporate ID, API key/secret, sandbox + production) directly from the provider's account team — not publicly documented the way their collection APIs are.
+3. **Pre-fund the corporate wallet** — these APIs debit from a wallet balance you top up ahead of time, not your bank account in real time.
+4. Confirm **per-transaction/per-day limits** on the account tier cover expected weekly payout volume.
+5. Decide JazzCash, EasyPaisa, or both. Bank-transfer vets (`payoutMethod: 'bank_transfer'`) are **out of scope** for this — that needs a separate, heavier 1LINK/bank-IBFT integration and should stay on the manual path even after wallet disbursement is automated.
+
+### Code integration to build once the above exists
+1. New service mirroring `SafepayService`'s pattern (`src/common/payments/safepay.service.ts`) — wraps the chosen provider's disbursement API (auth, submit payout, check status).
+2. Config additions via `ConfigService`/`.env`, same convention as `SAFEPAY_*`.
+3. Wire into `AdminService.settlePayout()` (`src/modules/admin/admin.service.ts`) — call the disbursement API with the vet's `walletNumber` + `Payout.amount` instead of (or before) the admin manually typing in a `transactionReference`; auto-fill it from the provider's response.
+4. Handle **async settlement** — these APIs are typically "submit now, confirmed later via webhook." `Payout.status` already has an unused `'processing'` value for exactly this transition; needs a webhook receiver following the same pattern as `appointments-webhook.controller.ts`/`consultations-webhook.controller.ts` to flip `processing` → `completed` (or a failed state) when the provider confirms.
+5. Failure/retry handling — a bounced disbursement (bad account number, insufficient float) must fall back into the pending queue with a visible reason, never silently disappear.

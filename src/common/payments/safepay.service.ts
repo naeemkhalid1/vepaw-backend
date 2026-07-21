@@ -60,7 +60,7 @@ export class SafepayService {
     // boundary or a 750 PKR fee gets charged as PKR 7.50.
     const session: unknown = await this.client.payments.session.setup({
       merchant_api_key: this.publicKey,
-      intent: 'CYBERSOURCE',
+      //   intent: 'CYBERSOURCE',
       mode: 'payment',
       currency: CURRENCY,
       amount: Math.round(amountPKR * 100),

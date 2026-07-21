@@ -84,9 +84,9 @@ export class PlaceOrderDto {
   @IsPositive()
   totalAmount: number;
 
-  @ApiProperty({ enum: ['jazzcash', 'easypaisa', 'cod'] })
-  @IsIn(['jazzcash', 'easypaisa', 'cod'])
-  paymentMethod: 'jazzcash' | 'easypaisa' | 'cod';
+  @ApiProperty({ enum: ['safepay', 'cod'] })
+  @IsIn(['safepay', 'cod'])
+  paymentMethod: 'safepay' | 'cod';
 
   @ApiProperty({ type: DeliveryAddressDto })
   @ValidateNested()

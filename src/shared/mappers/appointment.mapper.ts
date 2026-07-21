@@ -7,7 +7,7 @@ export function toAppointmentResponse(
   apt: AppointmentDocument,
   clinic?: Pick<
     Clinic,
-    'payoutMethod' | 'accountTitle' | 'mobileAccount'
+    'payoutMethod' | 'accountTitle' | 'walletNumber' | 'bankName' | 'accountNumber'
   > | null,
 ): AppointmentResponse {
   return {
@@ -28,7 +28,9 @@ export function toAppointmentResponse(
       ? {
           payoutMethod: clinic.payoutMethod,
           accountTitle: clinic.accountTitle,
-          mobileAccount: clinic.mobileAccount,
+          walletNumber: clinic.walletNumber,
+          bankName: clinic.bankName,
+          accountNumber: clinic.accountNumber,
         }
       : null,
     notes: apt.notes,

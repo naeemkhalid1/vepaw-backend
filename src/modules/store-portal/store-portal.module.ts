@@ -7,6 +7,10 @@ import { Review, ReviewSchema } from '../../database/schemas/review.schema';
 import { Payout, PayoutSchema } from '../../database/schemas/payout.schema';
 import { Invite, InviteSchema } from '../../database/schemas/invite.schema';
 import { User, UserSchema } from '../../database/schemas/user.schema';
+import {
+  PayoutAccountAudit,
+  PayoutAccountAuditSchema,
+} from '../../database/schemas/payout-account-audit.schema';
 import { StorePortalService } from './store-portal.service';
 import {
   StoreOrdersController,
@@ -31,6 +35,7 @@ import {
       { name: Payout.name, schema: PayoutSchema },
       { name: Invite.name, schema: InviteSchema },
       { name: User.name, schema: UserSchema },
+      { name: PayoutAccountAudit.name, schema: PayoutAccountAuditSchema },
     ]),
   ],
   controllers: [

@@ -7,13 +7,13 @@ NestJS REST API for the VePaw pet-care platform — serving a React Native app, 
 - **Runtime:** Node.js + TypeScript
 - **Framework:** NestJS 11 (Express)
 - **Database:** MongoDB (Atlas)
-- **Cache / Queue:** Redis + BullMQ
+- **Cache:** Redis (no queue/worker — scheduled work runs in-process via `@nestjs/schedule`, see `ARCHETECTURE.md` §5)
 - **Auth:** JWT (access 4h / refresh 7d) + OTP via SMS
 - **Real-time:** Socket.io
-- **Push:** Firebase FCM
-- **Payments:** JazzCash / Easypaisa
+- **Push:** Firebase FCM token storage only — dispatch not wired (no `firebase-admin` dependency)
+- **Payments:** Safepay (`@sfpy/node-core`) — appointments + paid consultations
 - **AI:** Anthropic SDK (symptom check)
-- **File storage:** Cloudinary
+- **File storage:** AWS S3
 
 ## Setup
 

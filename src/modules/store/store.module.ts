@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { StoreController } from './store.controller';
+import { StoreOrdersWebhookController } from './store-webhook.controller';
 import { StoreService } from './store.service';
 import { Product, ProductSchema } from '../../database/schemas/product.schema';
 import { Order, OrderSchema } from '../../database/schemas/order.schema';
@@ -14,7 +15,7 @@ import { User, UserSchema } from '../../database/schemas/user.schema';
       { name: User.name, schema: UserSchema },
     ]),
   ],
-  controllers: [StoreController],
+  controllers: [StoreController, StoreOrdersWebhookController],
   providers: [StoreService],
   exports: [StoreService],
 })

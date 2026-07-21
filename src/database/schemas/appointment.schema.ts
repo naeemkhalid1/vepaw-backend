@@ -78,6 +78,11 @@ export class Appointment {
   @Prop({ type: Date, default: null })
   payoutEligibleAt: Date | null;
 
+  // Set once this appointment's vetPayout has been included in a batched Payout request —
+  // excludes it from future "available to withdraw" totals so it can't be paid out twice.
+  @Prop({ type: Types.ObjectId, ref: 'Payout', default: null })
+  payoutId: Types.ObjectId | null;
+
   @Prop({ type: String, default: null })
   disputeReason: string | null;
 
@@ -112,4 +117,5 @@ export const AppointmentSchema = SchemaFactory.createForClass(Appointment);
 
 AppointmentSchema.index({ vet: 1, date: 1 });
 AppointmentSchema.index({ owner: 1, createdAt: -1 });
+AppointmentSchema.index({ vet: 1, status: 1, paymentStatus: 1, payoutId: 1 });
 AppointmentSchema.index({ vet: 1, status: 1 });

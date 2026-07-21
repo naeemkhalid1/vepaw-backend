@@ -206,7 +206,10 @@ export class AdminService {
         ntn: store.ntn,
         ownerCnic: store.ownerCnic,
         payoutMethod: store.payoutMethod,
-        merchantAccount: store.merchantAccount,
+        accountTitle: store.accountTitle,
+        walletNumber: store.walletNumber,
+        bankName: store.bankName,
+        accountNumber: store.accountNumber,
         documents: {
           businessProof: store.businessProof,
         },
@@ -318,10 +321,25 @@ export class AdminService {
   }
 
   async getTransactions(): Promise<ServiceResponse<Record<string, unknown>[]>> {
-    const [orders, appts] = await Promise.all([
+    const [orders, appts, consults] = await Promise.all([
       this.orderModel.find().sort({ createdAt: -1 }).limit(100).populate('user', 'name').lean().exec(),
       this.appointmentModel.find().sort({ createdAt: -1 }).limit(100).lean().exec(),
+      this.consultationModel.find().sort({ createdAt: -1 }).limit(100).lean().exec(),
     ]);
+
+    const petIds = [...new Set(consults.map((c) => c.pet.toString()))];
+    const vetIds = [...new Set(consults.map((c) => c.vet.toString()))];
+    const [pets, vets] = await Promise.all([
+      petIds.length ? this.petModel.find({ _id: { $in: petIds } }).select('name').lean().exec() : [],
+      vetIds.length ? this.vetModel.find({ _id: { $in: vetIds } }).select('name').lean().exec() : [],
+    ]);
+    const petNames = new Map(
+      pets.map((p: { _id: Types.ObjectId; name: string }): [string, string] => [p._id.toString(), p.name]),
+    );
+    const vetNames = new Map(
+      vets.map((v: { _id: Types.ObjectId; name: string }): [string, string] => [v._id.toString(), v.name]),
+    );
+
     const txns: Record<string, unknown>[] = [];
     for (const o of orders) {
       const user = o.user as unknown as { name?: string } | null;
@@ -330,23 +348,53 @@ export class AdminService {
     for (const a of appts) {
       txns.push({ id: a._id.toString(), ref: `BK-${a._id.toString().slice(-6).toUpperCase()}`, type: 'booking', parties: `${a.petDetails.name} → ${a.vetDetails.name}`, value: a.fee, payment: a.paymentMethod, status: a.status });
     }
+    for (const c of consults) {
+      const petName = petNames.get(c.pet.toString()) ?? 'Pet';
+      const vetName = vetNames.get(c.vet.toString()) ?? 'Vet';
+      txns.push({
+        id: c._id.toString(),
+        ref: `CN-${c._id.toString().slice(-6).toUpperCase()}`,
+        type: 'consultation',
+        parties: `${petName} → ${vetName}`,
+        value: c.amount,
+        payment: 'safepay',
+        status: c.status,
+      });
+    }
+
+    txns.sort((a, b) => (b.id as string).localeCompare(a.id as string));
     return { data: txns.slice(0, 100), message: 'Transactions retrieved' };
   }
 
   async getTransactionStats(): Promise<ServiceResponse<Record<string, unknown>>> {
     const startOfDay = new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate());
-    const [ordersToday, bookingsToday, heldOrders] = await Promise.all([
-      this.orderModel.countDocuments({ createdAt: { $gte: startOfDay } }),
-      this.appointmentModel.countDocuments({ createdAt: { $gte: startOfDay } }),
-      this.orderModel.find({ status: { $in: ['confirmed', 'packed', 'dispatched'] } }).lean().exec(),
-    ]);
-    const escrow = heldOrders.reduce((s, o) => s + o.totalAmount, 0);
+    const [ordersToday, bookingsToday, consultationsToday, heldOrders, heldAppts, activeConsults, disputedAppts, disputedConsults] =
+      await Promise.all([
+        this.orderModel.countDocuments({ createdAt: { $gte: startOfDay } }),
+        this.appointmentModel.countDocuments({ createdAt: { $gte: startOfDay } }),
+        this.consultationModel.countDocuments({ createdAt: { $gte: startOfDay } }),
+        this.orderModel.find({ status: { $in: ['confirmed', 'packed', 'dispatched'] } }).lean().exec(),
+        this.appointmentModel.find({ paymentStatus: 'held' }).lean().exec(),
+        this.consultationModel.find({ status: 'active' }).lean().exec(),
+        this.appointmentModel.countDocuments({ status: 'disputed' }),
+        this.consultationModel.countDocuments({ status: 'disputed' }),
+      ]);
+    // "In escrow" spans all three flows now, not just store orders — a held appointment or an
+    // active (payment collected, not yet closed) consultation is just as much "money we're
+    // holding" as a store order awaiting delivery confirmation.
+    const escrow =
+      heldOrders.reduce((s, o) => s + o.totalAmount, 0) +
+      heldAppts.reduce((s, a) => s + a.fee, 0) +
+      activeConsults.reduce((s, c) => s + c.amount, 0);
+    const disputes = disputedAppts + disputedConsults;
+
     return {
       data: {
         ordersToday, ordersChange: 0, ordersVolume: `PKR ${(ordersToday * 1500).toLocaleString()}`,
         bookingsToday, bookingsSubtitle: 'appointments today',
-        inEscrow: `PKR ${escrow.toLocaleString()}`, escrowSubtitle: 'held for delivery confirmation',
-        disputes: 0, disputesSubtitle: 'no active disputes',
+        consultationsToday, consultationsSubtitle: 'paid consultations today',
+        inEscrow: `PKR ${escrow.toLocaleString()}`, escrowSubtitle: 'held across orders, bookings & consultations',
+        disputes, disputesSubtitle: disputes === 1 ? '1 active dispute' : `${disputes} active disputes`,
       },
       message: 'Transaction stats retrieved',
     };
@@ -356,8 +404,8 @@ export class AdminService {
     const tiers = await this.commissionTierModel.find().sort({ createdAt: 1 }).lean().exec();
     if (tiers.length === 0) {
       return { data: [
-        { id: 'default-vet', tier: 'Vet Bookings', rate: '15%', appliesTo: 'All vet appointments' },
-        { id: 'default-store', tier: 'Store Orders', rate: '0%', appliesTo: 'All store orders' },
+        { id: 'default-vet', tier: 'Vet Bookings', rate: '10%', appliesTo: 'All vet appointments' },
+        { id: 'default-store', tier: 'Store Orders', rate: '10%', appliesTo: 'All store orders' },
       ], message: 'Commission tiers retrieved' };
     }
     return { data: tiers.map((t) => ({ id: t._id.toString(), tier: t.tier, rate: t.rate, appliesTo: t.appliesTo })), message: 'Commission tiers retrieved' };
@@ -365,13 +413,20 @@ export class AdminService {
 
   async getCommissionStats(): Promise<ServiceResponse<Record<string, unknown>>> {
     const startOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
-    const [monthOrders, monthAppts, pendingPayouts] = await Promise.all([
+    const [monthOrders, monthAppts, monthConsults, pendingPayouts] = await Promise.all([
       this.orderModel.find({ createdAt: { $gte: startOfMonth } }).lean().exec(),
       this.appointmentModel.find({ createdAt: { $gte: startOfMonth } }).lean().exec(),
+      this.consultationModel.find({ createdAt: { $gte: startOfMonth } }).lean().exec(),
       this.payoutModel.find({ status: 'pending' }).lean().exec(),
     ]);
-    const totalCommission = monthOrders.reduce((s, o) => s + o.platformCommission, 0) + monthAppts.reduce((s, a) => s + a.platformCommission, 0);
-    const totalGmv = monthOrders.reduce((s, o) => s + o.totalAmount, 0) + monthAppts.reduce((s, a) => s + a.fee, 0);
+    const totalCommission =
+      monthOrders.reduce((s, o) => s + o.platformCommission, 0) +
+      monthAppts.reduce((s, a) => s + a.platformCommission, 0) +
+      monthConsults.reduce((s, c) => s + c.platformCommission, 0);
+    const totalGmv =
+      monthOrders.reduce((s, o) => s + o.totalAmount, 0) +
+      monthAppts.reduce((s, a) => s + a.fee, 0) +
+      monthConsults.reduce((s, c) => s + c.amount, 0);
     const takeRate = totalGmv > 0 ? ((totalCommission / totalGmv) * 100).toFixed(1) : '0';
     const pendingTotal = pendingPayouts.reduce((s, p) => s + p.amount, 0);
     return {
@@ -393,6 +448,70 @@ export class AdminService {
     const tier = await this.commissionTierModel.findByIdAndUpdate(id, { $set: dto }).exec();
     if (!tier) throw new NotFoundException('Commission tier not found');
     return { data: null, message: 'Commission tier updated' };
+  }
+
+  // ─── Payouts ────────────────────────────────────────────
+
+  async getPayouts(status?: string): Promise<ServiceResponse<Record<string, unknown>[]>> {
+    const filter: Record<string, unknown> = status ? { status } : {};
+    const payouts = await this.payoutModel.find(filter).sort({ createdAt: -1 }).lean().exec();
+
+    const vetIds = payouts.filter((p) => p.entityType === 'vet').map((p) => p.entityId);
+    const storeIds = payouts.filter((p) => p.entityType === 'store').map((p) => p.entityId);
+    const [vets, stores] = await Promise.all([
+      vetIds.length ? this.vetModel.find({ _id: { $in: vetIds } }).select('name clinicName').lean().exec() : [],
+      storeIds.length ? this.storeModel.find({ _id: { $in: storeIds } }).select('storeName').lean().exec() : [],
+    ]);
+    const vetNames = new Map(
+      vets.map((v: { _id: Types.ObjectId; name: string; clinicName?: string }): [string, string] => [
+        v._id.toString(),
+        v.clinicName || v.name,
+      ]),
+    );
+    const storeNames = new Map(
+      stores.map((s: { _id: Types.ObjectId; storeName: string }): [string, string] => [s._id.toString(), s.storeName]),
+    );
+
+    return {
+      data: payouts.map((p) => ({
+        id: p._id.toString(),
+        entityType: p.entityType,
+        entityName:
+          p.entityType === 'vet'
+            ? (vetNames.get(p.entityId.toString()) ?? 'Unknown vet')
+            : (storeNames.get(p.entityId.toString()) ?? 'Unknown store'),
+        label: p.label,
+        date: p.date,
+        method: p.method,
+        orders: p.orders,
+        gross: p.gross,
+        commission: p.commission,
+        netPaid: p.netPaid,
+        amount: p.amount,
+        status: p.status,
+        transactionReference: p.transactionReference,
+        settledAt: p.settledAt,
+      })),
+      message: 'Payouts retrieved',
+    };
+  }
+
+  // Admin confirms the manual bank/wallet transfer was actually sent — this is the step that
+  // closes the loop, since neither Safepay nor this platform can disburse funds automatically yet.
+  async settlePayout(id: string, adminId: string, transactionReference?: string): Promise<ServiceResponse<null>> {
+    const payout = await this.payoutModel.findById(id).exec();
+    if (!payout) throw new NotFoundException('Payout not found');
+    if (payout.status === 'completed') {
+      throw new BadRequestException({ message: 'Payout already settled', code: 'ALREADY_SETTLED' });
+    }
+
+    payout.status = 'completed';
+    payout.transactionReference = transactionReference ?? null;
+    payout.settledAt = new Date();
+    payout.settledBy = new Types.ObjectId(adminId);
+    await payout.save();
+
+    return { data: null, message: 'Payout marked as settled' };
   }
 
   async getBroadcasts(): Promise<ServiceResponse<Record<string, unknown>[]>> {
@@ -507,7 +626,9 @@ export class AdminService {
             name: app.clinicName,
             payoutMethod: app.payoutMethod,
             accountTitle: app.accountTitle,
-            mobileAccount: app.mobileAccount,
+            walletNumber: app.walletNumber,
+            bankName: app.bankName,
+            accountNumber: app.accountNumber,
             cnicOnAccount: app.cnicOnAccount,
             ownerId: existing._id,
           });
@@ -529,7 +650,9 @@ export class AdminService {
           name: app.clinicName,
           payoutMethod: app.payoutMethod,
           accountTitle: app.accountTitle,
-          mobileAccount: app.mobileAccount,
+          walletNumber: app.walletNumber,
+          bankName: app.bankName,
+          accountNumber: app.accountNumber,
           cnicOnAccount: app.cnicOnAccount,
           ownerId: newVet._id,
         });
@@ -728,14 +851,21 @@ export class AdminService {
 
   async getReportStatsWithPeriod(period?: string): Promise<ServiceResponse<Record<string, unknown>>> {
     const dateFilter = this.getPeriodFilter(period ?? 'ytd');
-    const [orders, appts] = await Promise.all([
+    const [orders, appts, consults] = await Promise.all([
       this.orderModel.find(dateFilter ? { createdAt: dateFilter } : {}).lean().exec(),
       this.appointmentModel.find(dateFilter ? { createdAt: dateFilter } : {}).lean().exec(),
+      this.consultationModel.find(dateFilter ? { createdAt: dateFilter } : {}).lean().exec(),
     ]);
-    const gmv = orders.reduce((s, o) => s + o.totalAmount, 0) + appts.reduce((s, a) => s + a.fee, 0);
-    const commission = orders.reduce((s, o) => s + o.platformCommission, 0) + appts.reduce((s, a) => s + a.platformCommission, 0);
+    const gmv =
+      orders.reduce((s, o) => s + o.totalAmount, 0) +
+      appts.reduce((s, a) => s + a.fee, 0) +
+      consults.reduce((s, c) => s + c.amount, 0);
+    const commission =
+      orders.reduce((s, o) => s + o.platformCommission, 0) +
+      appts.reduce((s, a) => s + a.platformCommission, 0) +
+      consults.reduce((s, c) => s + c.platformCommission, 0);
     const takeRate = gmv > 0 ? ((commission / gmv) * 100).toFixed(1) : '0';
-    const count = orders.length + appts.length;
+    const count = orders.length + appts.length + consults.length;
     const avgOrder = count > 0 ? Math.round(gmv / count) : 0;
     return {
       data: {

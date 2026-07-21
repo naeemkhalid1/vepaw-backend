@@ -306,7 +306,19 @@ export class StoreSettingsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Submit new payout account' })
   updatePayoutAccount(@CurrentUser() user: JwtPayload, @Body() dto: UpdatePayoutAccountDto) {
-    return this.service.updatePayoutAccount(user.sub, dto.accountNumber);
+    return this.service.updatePayoutAccount(user.sub, dto);
+  }
+
+  @Get('payout/history')
+  @ApiOperation({ summary: 'Audit log of payout account changes for this store' })
+  getPayoutAccountHistory(@CurrentUser() user: JwtPayload) {
+    return this.service.getPayoutAccountHistory(user.sub);
+  }
+
+  @Get('payout/activity')
+  @ApiOperation({ summary: 'Unified feed: payout account changes + payout requested/settled events' })
+  getPayoutActivity(@CurrentUser() user: JwtPayload) {
+    return this.service.getPayoutActivity(user.sub);
   }
 }
 

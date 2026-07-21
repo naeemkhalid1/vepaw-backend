@@ -37,6 +37,19 @@ export class ConsultationSession {
   @Prop({ required: true, min: 0 })
   amount: number;
 
+  // Percentage-based (not the flat PKR constant appointments use) — text-consult fees are
+  // priced much lower than in-person appointments, see CONSULTATION_COMMISSION_RATE.
+  @Prop({ required: true, min: 0 })
+  platformCommission: number;
+
+  @Prop({ required: true, min: 0 })
+  vetPayout: number;
+
+  // Set once this session's vetPayout has been included in a batched Payout — same
+  // double-payment guard as Appointment.payoutId.
+  @Prop({ type: Types.ObjectId, ref: 'Payout', default: null })
+  payoutId: Types.ObjectId | null;
+
   @Prop({
     type: String,
     enum: CONSULTATION_STATUSES,

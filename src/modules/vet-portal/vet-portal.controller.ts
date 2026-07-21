@@ -198,6 +198,7 @@ export class VetEarningsController {
 @Controller('vet/payouts')
 @ApiBearerAuth()
 @Roles('vet')
+@ClinicRoles('admin_vet', 'manager')
 export class VetPayoutsController {
   constructor(private readonly service: VetPortalService) {}
 
@@ -367,7 +368,21 @@ export class VetClinicSettingsController {
   @ClinicRoles('admin_vet', 'manager')
   @ApiOperation({ summary: 'Submit new payout account' })
   updatePayoutAccount(@CurrentUser() user: JwtPayload, @Body() dto: UpdatePayoutAccountDto) {
-    return this.service.updateVetPayoutAccount(user.sub, dto.accountNumber);
+    return this.service.updateVetPayoutAccount(user.sub, dto);
+  }
+
+  @Get('payout/history')
+  @ClinicRoles('admin_vet', 'manager')
+  @ApiOperation({ summary: 'Audit log of payout account changes for this clinic' })
+  getPayoutAccountHistory(@CurrentUser() user: JwtPayload) {
+    return this.service.getPayoutAccountHistory(user.sub);
+  }
+
+  @Get('payout/activity')
+  @ClinicRoles('admin_vet', 'manager')
+  @ApiOperation({ summary: 'Unified feed: payout account changes + payout requested/settled events' })
+  getPayoutActivity(@CurrentUser() user: JwtPayload) {
+    return this.service.getPayoutActivity(user.sub);
   }
 }
 

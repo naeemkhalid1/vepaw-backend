@@ -44,6 +44,21 @@ export class Payout {
     default: 'completed',
   })
   status: 'pending' | 'processing' | 'completed';
+
+  // Null when this batch was created by the weekly auto-batch cron rather than a specific
+  // admin_vet/manager clicking "withdraw" — distinguishes system-triggered from user-triggered.
+  @Prop({ type: Types.ObjectId, ref: 'Vet', default: null })
+  requestedBy: Types.ObjectId | null;
+
+  // Filled in when an admin confirms the manual transfer (bank/wallet) was actually sent.
+  @Prop({ type: String, default: null })
+  transactionReference: string | null;
+
+  @Prop({ type: Date, default: null })
+  settledAt: Date | null;
+
+  @Prop({ type: Types.ObjectId, ref: 'User', default: null })
+  settledBy: Types.ObjectId | null;
 }
 
 export const PayoutSchema = SchemaFactory.createForClass(Payout);

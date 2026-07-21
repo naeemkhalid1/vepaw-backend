@@ -7,6 +7,7 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
+import { Cron } from '@nestjs/schedule';
 import { Model, Types } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import { randomBytes } from 'crypto';
@@ -21,6 +22,10 @@ import { Pet, PetDocument } from '../../database/schemas/pet.schema';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { Review, ReviewDocument } from '../../database/schemas/review.schema';
 import { Payout, PayoutDocument } from '../../database/schemas/payout.schema';
+import {
+  PayoutAccountAudit,
+  PayoutAccountAuditDocument,
+} from '../../database/schemas/payout-account-audit.schema';
 import { Listing, ListingDocument } from '../../database/schemas/listing.schema';
 import { Invite, InviteDocument } from '../../database/schemas/invite.schema';
 import { TimeOff, TimeOffDocument } from '../../database/schemas/time-off.schema';
@@ -56,7 +61,9 @@ import { BlockSlotsDto } from './dto/block-slots.dto';
 import { BlockDayDto } from './dto/block-day.dto';
 import { SubmitOnboardingDto } from './dto/submit-onboarding.dto';
 import { AcceptVetInviteDto } from './dto/accept-vet-invite.dto';
+import { UpdatePayoutAccountDto } from './dto/update-status.dto';
 import { karachiDateStr, karachiTimeStr, karachiStartOfMonth, karachiDateTimeToUTC } from '../../shared/utils/karachi-time.util';
+import { PayoutMethod, payoutMethodLabel, payoutAccountValue, maskPayoutValue } from '../../shared/utils/payout-account.util';
 import {
   isValidAppointmentTransition,
   PAYOUT_HOLD_MS,
@@ -73,6 +80,9 @@ const PET_TYPE_COLORS: Record<string, string> = { dog: '#6366F1', cat: '#F59E0B'
 function getInitials(name: string): string {
   return name.split(' ').map((w) => w[0]).join('').toUpperCase().slice(0, 2);
 }
+
+// payoutMethodLabel/payoutAccountValue/maskPayoutValue moved to
+// shared/utils/payout-account.util.ts — reused by store-portal for the same purpose.
 
 function getColor(name: string): string {
   let hash = 0;
@@ -131,6 +141,8 @@ export class VetPortalService {
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     @InjectModel(Review.name) private readonly reviewModel: Model<ReviewDocument>,
     @InjectModel(Payout.name) private readonly payoutModel: Model<PayoutDocument>,
+    @InjectModel(PayoutAccountAudit.name)
+    private readonly payoutAccountAuditModel: Model<PayoutAccountAuditDocument>,
     @InjectModel(Listing.name) private readonly listingModel: Model<ListingDocument>,
     @InjectModel(Invite.name) private readonly inviteModel: Model<InviteDocument>,
     @InjectModel(TimeOff.name) private readonly timeOffModel: Model<TimeOffDocument>,
@@ -548,9 +560,13 @@ export class VetPortalService {
 
   // ─── Payouts ──────────────────────────────────────────
 
+  // Payout activity belongs to the clinic, not to whichever individual staff vet happens to be
+  // logged in — always resolve to the clinic's canonical adminVetId so admin_vet and manager
+  // see the same shared history regardless of who's viewing it.
   async getPayouts(vetId: string): Promise<ServiceResponse<Record<string, unknown>[]>> {
+    const { adminVetId } = await this.resolveClinicVetIds(vetId);
     const payouts = await this.payoutModel
-      .find({ entityId: new Types.ObjectId(vetId), entityType: 'vet' })
+      .find({ entityId: adminVetId, entityType: 'vet' })
       .sort({ createdAt: -1 })
       .lean()
       .exec();
@@ -567,17 +583,31 @@ export class VetPortalService {
   }
 
   async getPayoutSummary(vetId: string): Promise<ServiceResponse<Record<string, unknown>>> {
-    const completedAppts = await this.appointmentModel
-      .find({ vet: new Types.ObjectId(vetId), status: 'completed', paymentStatus: 'released' })
-      .lean()
-      .exec();
-    const available = completedAppts.reduce((s, a) => s + a.vetPayout, 0);
+    const { vetIds } = await this.resolveClinicVetIds(vetId);
 
-    const heldAppts = await this.appointmentModel
-      .find({ vet: new Types.ObjectId(vetId), status: 'completed', paymentStatus: 'held' })
-      .lean()
-      .exec();
-    const held = heldAppts.reduce((s, a) => s + a.vetPayout, 0);
+    const [completedAppts, completedConsults] = await Promise.all([
+      this.appointmentModel
+        .find({ vet: { $in: vetIds }, status: 'completed', paymentStatus: 'released', payoutId: null })
+        .lean()
+        .exec(),
+      this.consultationModel
+        .find({ vet: { $in: vetIds }, status: { $in: ['closed', 'expired'] }, payoutId: null })
+        .lean()
+        .exec(),
+    ]);
+    const available =
+      completedAppts.reduce((s, a) => s + a.vetPayout, 0) + completedConsults.reduce((s, c) => s + c.vetPayout, 0);
+
+    // "held" mirrors appointments' held-escrow bucket — a disputed appointment/consultation is
+    // excluded from both buckets, same as before, since it's only visible via the admin dispute queue.
+    const [heldAppts, heldConsults] = await Promise.all([
+      this.appointmentModel
+        .find({ vet: { $in: vetIds }, status: 'completed', paymentStatus: 'held' })
+        .lean()
+        .exec(),
+      this.consultationModel.find({ vet: { $in: vetIds }, status: 'active' }).lean().exec(),
+    ]);
+    const held = heldAppts.reduce((s, a) => s + a.vetPayout, 0) + heldConsults.reduce((s, c) => s + c.vetPayout, 0);
 
     return {
       data: { availableToWithdraw: available, heldInEscrow: held, nextAutoPayout: 'Monday' },
@@ -590,13 +620,14 @@ export class VetPortalService {
     if (!vet) throw new NotFoundException('Vet not found');
 
     const clinic = vet.clinicId ? await this.clinicModel.findById(vet.clinicId).lean().exec() : null;
-    const account = clinic?.mobileAccount ?? '';
+    const account = payoutAccountValue(clinic);
     const masked = account.length > 4 ? '•••• ' + account.slice(-4) : account;
+    const label = payoutMethodLabel(clinic?.payoutMethod, clinic?.bankName);
 
     return {
       data: {
-        label: clinic?.payoutMethod ?? 'JazzCash',
-        initials: getInitials(clinic?.payoutMethod ?? 'JC'),
+        label,
+        initials: getInitials(label),
         maskedNumber: masked,
         accountName: clinic?.accountTitle ?? vet.name,
         commissionNote: `Platform commission applied`,
@@ -815,12 +846,138 @@ export class VetPortalService {
     return vet.clinicId as Types.ObjectId;
   }
 
+  // Writes one immutable audit entry per payout-account change — who, from what, to what.
+  // Called from both places a clinic's payout account can be written (clinic-settings PUT and
+  // the dedicated payout POST) so neither path can silently skip the trail.
+  private async recordPayoutAccountChange(
+    clinicId: Types.ObjectId,
+    actingVetId: string,
+    actingVetName: string,
+    actingStaffRole: 'admin_vet' | 'team_vet' | 'manager' | null | undefined,
+    previous: Pick<Clinic, 'payoutMethod' | 'accountTitle' | 'walletNumber' | 'bankName' | 'accountNumber'> | null,
+    next: {
+      payoutMethod: PayoutMethod;
+      accountTitle: string;
+      walletNumber: string | null;
+      bankName: string | null;
+      accountNumber: string | null;
+    },
+  ): Promise<void> {
+    await this.payoutAccountAuditModel.create({
+      entityId: clinicId,
+      entityType: 'vet',
+      changedBy: new Types.ObjectId(actingVetId),
+      changedByName: actingVetName,
+      changedByRole: actingStaffRole ?? null,
+      previousValues: previous
+        ? {
+            payoutMethod: previous.payoutMethod,
+            accountTitle: previous.accountTitle,
+            walletNumber: previous.walletNumber,
+            bankName: previous.bankName,
+            accountNumber: previous.accountNumber,
+          }
+        : null,
+      newValues: next,
+    });
+  }
+
+  async getPayoutAccountHistory(vetId: string): Promise<ServiceResponse<Record<string, unknown>[]>> {
+    const clinicId = await this.requireClinicId(vetId);
+    const entries = await this.payoutAccountAuditModel
+      .find({ entityId: clinicId, entityType: 'vet' })
+      .sort({ createdAt: -1 })
+      .lean()
+      .exec();
+
+    return {
+      data: entries.map((e) => ({
+        id: e._id.toString(),
+        changedByName: e.changedByName,
+        changedByRole: e.changedByRole,
+        previousMethod: e.previousValues ? payoutMethodLabel(e.previousValues.payoutMethod, e.previousValues.bankName) : null,
+        previousMasked: e.previousValues ? maskPayoutValue(e.previousValues) : null,
+        newMethod: payoutMethodLabel(e.newValues.payoutMethod, e.newValues.bankName),
+        newMasked: maskPayoutValue(e.newValues),
+        changedAt: e.createdAt,
+      })),
+      message: 'Payout account history retrieved',
+    };
+  }
+
+  // Merges the payout-account audit trail with the payout lifecycle (requested → settled) into
+  // one chronological feed — "who changed the account" and "who requested/settled money" are
+  // two different collections under the hood but one story for the clinic owner reading it.
+  async getPayoutActivity(vetId: string): Promise<ServiceResponse<Record<string, unknown>[]>> {
+    const { clinicId, adminVetId } = await this.resolveClinicVetIds(vetId);
+    if (!clinicId) {
+      throw new BadRequestException({ message: 'No clinic is set up for this account', code: 'CLINIC_NOT_FOUND' });
+    }
+
+    const [accountChanges, payouts] = await Promise.all([
+      this.payoutAccountAuditModel.find({ entityId: clinicId, entityType: 'vet' }).lean().exec(),
+      this.payoutModel.find({ entityId: adminVetId, entityType: 'vet' }).lean().exec(),
+    ]);
+
+    const requesterIds = payouts.filter((p) => p.requestedBy).map((p) => p.requestedBy as Types.ObjectId);
+    const settlerIds = payouts.filter((p) => p.settledBy).map((p) => p.settledBy as Types.ObjectId);
+    const emptyNamed: { _id: Types.ObjectId; name: string }[] = [];
+    const [requesters, settlers] = await Promise.all([
+      requesterIds.length ? this.vetModel.find({ _id: { $in: requesterIds } }).select('name').lean().exec() : emptyNamed,
+      settlerIds.length ? this.userModel.find({ _id: { $in: settlerIds } }).select('name').lean().exec() : emptyNamed,
+    ]);
+    const requesterNames = new Map(
+      requesters.map((v: { _id: Types.ObjectId; name: string }): [string, string] => [v._id.toString(), v.name]),
+    );
+    const settlerNames = new Map(
+      settlers.map((u: { _id: Types.ObjectId; name: string }): [string, string] => [u._id.toString(), u.name]),
+    );
+
+    const events: { id: string; type: string; summary: string; actor: string | null; occurredAt: Date }[] = [];
+
+    for (const e of accountChanges) {
+      events.push({
+        id: e._id.toString(),
+        type: 'account_updated',
+        summary: e.previousValues
+          ? `Payout account changed from ${payoutMethodLabel(e.previousValues.payoutMethod, e.previousValues.bankName)} to ${payoutMethodLabel(e.newValues.payoutMethod, e.newValues.bankName)}`
+          : `Payout account set up (${payoutMethodLabel(e.newValues.payoutMethod, e.newValues.bankName)})`,
+        actor: e.changedByName,
+        occurredAt: e.createdAt,
+      });
+    }
+
+    for (const p of payouts) {
+      events.push({
+        id: `${p._id.toString()}-requested`,
+        type: 'payout_requested',
+        summary: `Payout requested — PKR ${p.amount.toLocaleString()} (${p.orders} appointment${p.orders === 1 ? '' : 's'})`,
+        actor: p.requestedBy ? (requesterNames.get(p.requestedBy.toString()) ?? null) : 'Weekly auto-batch',
+        occurredAt: p.createdAt,
+      });
+
+      if (p.status === 'completed' && p.settledAt) {
+        events.push({
+          id: `${p._id.toString()}-settled`,
+          type: 'payout_settled',
+          summary: `Payout settled — PKR ${p.amount.toLocaleString()}${p.transactionReference ? ` (ref: ${p.transactionReference})` : ''}`,
+          actor: p.settledBy ? (settlerNames.get(p.settledBy.toString()) ?? null) : null,
+          occurredAt: p.settledAt,
+        });
+      }
+    }
+
+    events.sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime());
+
+    return { data: events, message: 'Payout activity retrieved' };
+  }
+
   async getClinicSettings(vetId: string): Promise<ServiceResponse<Record<string, unknown>>> {
     const vet = await this.vetModel.findById(vetId).lean().exec();
     if (!vet) throw new NotFoundException('Vet not found');
 
     const clinic = vet.clinicId ? await this.clinicModel.findById(vet.clinicId).lean().exec() : null;
-    const account = clinic?.mobileAccount ?? '';
+    const account = payoutAccountValue(clinic);
     const masked = account.length > 4 ? '•••• ' + account.slice(-4) : account;
 
     const workingDays: string[] = [];
@@ -856,11 +1013,12 @@ export class VetPortalService {
           bookableSlotsPerDay: 16,
         },
         payout: {
-          method: clinic?.payoutMethod ?? 'JazzCash',
-          methodInitials: getInitials(clinic?.payoutMethod ?? 'JC'),
+          method: clinic?.payoutMethod ?? 'jazzcash',
+          methodInitials: getInitials(payoutMethodLabel(clinic?.payoutMethod, clinic?.bankName)),
           accountHolder: clinic?.accountTitle ?? vet.name,
+          bankName: clinic?.bankName ?? null,
           maskedNumber: masked,
-          commissionRate: '15%',
+          commissionRate: '10%', // matches PLATFORM_COMMISSION_RATE/CONSULTATION_COMMISSION_RATE — update together
           commissionLabel: 'Platform commission on bookings',
         },
         notifications: (vet.notifications ?? [
@@ -932,10 +1090,17 @@ export class VetPortalService {
 
     if (dto.payout) {
       const clinicId = await this.requireClinicId(vetId);
-      await this.clinicModel.findByIdAndUpdate(clinicId, {
+      const isBank = dto.payout.method === 'bank_transfer';
+      const previous = await this.clinicModel.findById(clinicId).lean().exec();
+      const nextValues = {
         payoutMethod: dto.payout.method,
         accountTitle: dto.payout.accountHolder,
-      }).exec();
+        walletNumber: isBank ? null : (dto.payout.walletNumber ?? null),
+        bankName: isBank ? (dto.payout.bankName ?? null) : null,
+        accountNumber: isBank ? (dto.payout.accountNumber ?? null) : null,
+      };
+      await this.clinicModel.findByIdAndUpdate(clinicId, nextValues).exec();
+      await this.recordPayoutAccountChange(clinicId, vetId, vet.name, user.staffRole, previous, nextValues);
     }
 
     if (dto.notifications) {
@@ -1237,7 +1402,9 @@ export class VetPortalService {
         clinicPhoto: draft.clinicPhoto ? { name: draft.clinicPhoto, status: 'uploaded' } : null,
         payoutMethod: draft.payoutMethod,
         accountTitle: draft.accountTitle,
-        mobileAccount: draft.mobileAccount,
+        walletNumber: draft.walletNumber,
+        bankName: draft.bankName,
+        accountNumber: draft.accountNumber,
         cnicOnAccount: draft.cnicOnAccount,
       },
       message: 'Draft retrieved',
@@ -1268,7 +1435,9 @@ export class VetPortalService {
       clinicPhoto: dto.clinicPhoto?.name ?? null,
       payoutMethod: dto.payoutMethod,
       accountTitle: dto.accountTitle,
-      mobileAccount: dto.mobileAccount,
+      walletNumber: dto.walletNumber ?? null,
+      bankName: dto.bankName ?? null,
+      accountNumber: dto.accountNumber ?? null,
       cnicOnAccount: dto.cnicOnAccount,
       status: 'pending',
     });
@@ -1981,13 +2150,162 @@ export class VetPortalService {
     return { data: null, message: `Member ${status}` };
   }
 
-  async vetWithdraw(vetId: string): Promise<ServiceResponse<{ success: boolean }>> {
-    return { data: { success: true }, message: 'Withdrawal requested' };
+  // Shared by the vet-initiated withdraw endpoint and the weekly auto-batch cron below.
+  // Scoped to every vet under the clinic (not just whichever staff member triggered it) and
+  // always recorded under the clinic's canonical adminVetId, so payout history/balance is one
+  // shared clinic ledger rather than fragmenting per staff member. Pulls from both appointments
+  // and paid text consultations — payoutId on each guards against paying the same item out
+  // twice. Returns null when there's nothing to batch across either source, so callers can
+  // decide whether that's an error or just a no-op.
+  private async batchPayoutForVet(
+    vetIds: Types.ObjectId[],
+    adminVetId: Types.ObjectId,
+    clinic: Pick<Clinic, 'payoutMethod' | 'bankName'>,
+    requestedBy: Types.ObjectId | null,
+  ): Promise<{ payoutId: Types.ObjectId; amount: number } | null> {
+    const [unsettledAppts, unsettledConsults] = await Promise.all([
+      this.appointmentModel
+        .find({ vet: { $in: vetIds }, status: 'completed', paymentStatus: 'released', payoutId: null })
+        .exec(),
+      this.consultationModel
+        .find({ vet: { $in: vetIds }, status: { $in: ['closed', 'expired'] }, payoutId: null })
+        .exec(),
+    ]);
+
+    const itemCount = unsettledAppts.length + unsettledConsults.length;
+    const amount =
+      unsettledAppts.reduce((s, a) => s + a.vetPayout, 0) + unsettledConsults.reduce((s, c) => s + c.vetPayout, 0);
+    if (itemCount === 0 || amount <= 0) return null;
+
+    const gross =
+      unsettledAppts.reduce((s, a) => s + a.fee, 0) + unsettledConsults.reduce((s, c) => s + c.amount, 0);
+    const commission =
+      unsettledAppts.reduce((s, a) => s + a.platformCommission, 0) +
+      unsettledConsults.reduce((s, c) => s + c.platformCommission, 0);
+
+    const payout = await this.payoutModel.create({
+      entityId: adminVetId,
+      entityType: 'vet',
+      label: `Payout — ${itemCount} item${itemCount === 1 ? '' : 's'}`,
+      date: karachiDateStr(),
+      method: payoutMethodLabel(clinic.payoutMethod, clinic.bankName),
+      orders: itemCount,
+      gross,
+      commission,
+      netPaid: amount,
+      amount,
+      status: 'pending',
+      requestedBy,
+    });
+
+    await Promise.all([
+      unsettledAppts.length
+        ? this.appointmentModel
+            .updateMany({ _id: { $in: unsettledAppts.map((a) => a._id) } }, { $set: { payoutId: payout._id } })
+            .exec()
+        : Promise.resolve(),
+      unsettledConsults.length
+        ? this.consultationModel
+            .updateMany({ _id: { $in: unsettledConsults.map((c) => c._id) } }, { $set: { payoutId: payout._id } })
+            .exec()
+        : Promise.resolve(),
+    ]);
+
+    return { payoutId: payout._id, amount };
   }
 
-  async updateVetPayoutAccount(vetId: string, accountNumber: string): Promise<ServiceResponse<null>> {
-    const clinicId = await this.requireClinicId(vetId);
-    await this.clinicModel.findByIdAndUpdate(clinicId, { mobileAccount: accountNumber }).exec();
+  // Restricted to admin_vet/manager via @ClinicRoles on the controller — a regular team_vet
+  // can't trigger a clinic payout, only view what the guard's role check allows them to.
+  async vetWithdraw(vetId: string): Promise<ServiceResponse<{ payoutId: string; amount: number }>> {
+    const { clinicId, vetIds, adminVetId } = await this.resolveClinicVetIds(vetId);
+    if (!clinicId) {
+      throw new BadRequestException({ message: 'No clinic is set up for this account', code: 'CLINIC_NOT_FOUND' });
+    }
+
+    const clinic = await this.clinicModel.findById(clinicId).lean().exec();
+    if (!clinic?.payoutMethod) {
+      throw new BadRequestException({
+        message: 'Set up a payout account before requesting a withdrawal',
+        code: 'PAYOUT_ACCOUNT_NOT_SET',
+      });
+    }
+
+    const result = await this.batchPayoutForVet(vetIds, adminVetId, clinic, new Types.ObjectId(vetId));
+    if (!result) {
+      throw new BadRequestException({
+        message: 'No available balance to withdraw',
+        code: 'NO_BALANCE_AVAILABLE',
+      });
+    }
+
+    return {
+      data: { payoutId: result.payoutId.toString(), amount: result.amount },
+      message: 'Withdrawal requested — pending admin settlement',
+    };
+  }
+
+  // Runs every Monday at 00:00 Asia/Karachi, pinned explicitly so it doesn't depend on the
+  // host process's local TZ. Auto-batches every clinic's released-but-unpaid balance into a
+  // pending Payout so admin has a ready queue each week instead of waiting on someone to click
+  // "withdraw" individually. Dedupes by clinic (via adminVetId) so a clinic with several staff
+  // vets who each have unsettled appointments gets exactly one combined batch, not one per vet.
+  @Cron('0 0 * * 1', { timeZone: 'Asia/Karachi' })
+  async autoBatchWeeklyPayouts(): Promise<void> {
+    const [vetIdsFromAppts, vetIdsFromConsults] = await Promise.all([
+      this.appointmentModel.distinct('vet', {
+        status: 'completed',
+        paymentStatus: 'released',
+        payoutId: null,
+      }),
+      this.consultationModel.distinct('vet', {
+        status: { $in: ['closed', 'expired'] },
+        payoutId: null,
+      }),
+    ]);
+    const vetIdsWithBalance = [...vetIdsFromAppts, ...vetIdsFromConsults];
+
+    const seenClinics = new Set<string>();
+    let batched = 0;
+
+    for (const vetId of vetIdsWithBalance as Types.ObjectId[]) {
+      const { clinicId, vetIds, adminVetId } = await this.resolveClinicVetIds(vetId.toString());
+      if (!clinicId) continue; // legacy solo vet with no Clinic doc — no payout account possible
+      if (seenClinics.has(adminVetId.toString())) continue;
+      seenClinics.add(adminVetId.toString());
+
+      const clinic = await this.clinicModel
+        .findById(clinicId)
+        .select('payoutMethod bankName')
+        .lean()
+        .exec();
+      if (!clinic?.payoutMethod) continue; // no payout account set up yet — skip until they add one
+
+      const result = await this.batchPayoutForVet(vetIds, adminVetId, clinic, null);
+      if (result) batched++;
+    }
+
+    if (batched > 0) {
+      this.logger.log(`Weekly auto-batch: created ${batched} pending payout(s)`);
+    }
+  }
+
+  async updateVetPayoutAccount(vetId: string, dto: UpdatePayoutAccountDto): Promise<ServiceResponse<null>> {
+    const vet = await this.vetModel.findById(vetId).select('name staffRole clinicId').lean().exec();
+    if (!vet?.clinicId) {
+      throw new BadRequestException({ message: 'No clinic is set up for this account', code: 'CLINIC_NOT_FOUND' });
+    }
+    const clinicId = vet.clinicId;
+    const isBank = dto.method === 'bank_transfer';
+    const previous = await this.clinicModel.findById(clinicId).lean().exec();
+    const nextValues = {
+      payoutMethod: dto.method,
+      accountTitle: dto.accountTitle,
+      walletNumber: isBank ? null : (dto.walletNumber ?? null),
+      bankName: isBank ? (dto.bankName ?? null) : null,
+      accountNumber: isBank ? (dto.accountNumber ?? null) : null,
+    };
+    await this.clinicModel.findByIdAndUpdate(clinicId, nextValues).exec();
+    await this.recordPayoutAccountChange(clinicId, vetId, vet.name, vet.staffRole, previous, nextValues);
     return { data: null, message: 'Payout account submitted for verification' };
   }
 

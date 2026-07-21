@@ -11,6 +11,10 @@ import { Pet, PetSchema } from '../../database/schemas/pet.schema';
 import { User, UserSchema } from '../../database/schemas/user.schema';
 import { Review, ReviewSchema } from '../../database/schemas/review.schema';
 import { Payout, PayoutSchema } from '../../database/schemas/payout.schema';
+import {
+  PayoutAccountAudit,
+  PayoutAccountAuditSchema,
+} from '../../database/schemas/payout-account-audit.schema';
 import { Listing, ListingSchema } from '../../database/schemas/listing.schema';
 import { Invite, InviteSchema } from '../../database/schemas/invite.schema';
 import { TimeOff, TimeOffSchema } from '../../database/schemas/time-off.schema';
@@ -58,6 +62,7 @@ import {
       { name: User.name, schema: UserSchema },
       { name: Review.name, schema: ReviewSchema },
       { name: Payout.name, schema: PayoutSchema },
+      { name: PayoutAccountAudit.name, schema: PayoutAccountAuditSchema },
       { name: Listing.name, schema: ListingSchema },
       { name: Invite.name, schema: InviteSchema },
       { name: TimeOff.name, schema: TimeOffSchema },
