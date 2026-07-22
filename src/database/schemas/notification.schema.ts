@@ -21,6 +21,7 @@ export class Notification {
       'vaccination',
       'order_delivery',
       'order_delivered',
+      'order_cancelled',
       'message',
       'booking',
       'rating',

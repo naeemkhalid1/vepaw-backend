@@ -14,6 +14,7 @@ import { Model, Types } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import { AuthService } from '../auth/auth.service';
 import { EmailService } from '../../common/email/email.service';
+import { S3Service } from '../../common/storage/s3.service';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { Vet, VetDocument } from '../../database/schemas/vet.schema';
 import { Clinic, ClinicDocument } from '../../database/schemas/clinic.schema';
@@ -87,6 +88,7 @@ export class AdminService {
     private readonly jwtService: JwtService,
     @Inject(forwardRef(() => AuthService)) private readonly authService: AuthService,
     private readonly emailService: EmailService,
+    private readonly s3Service: S3Service,
   ) {}
 
   async getOverviewStats(): Promise<ServiceResponse<Record<string, unknown>>> {
@@ -249,6 +251,10 @@ export class AdminService {
     const app = await this.vetApplicationModel.findById(id).lean().exec();
     if (!app) throw new NotFoundException('Application not found');
 
+    // cnic is stored as a private S3 key (government ID, never a permanent public URL) — sign a
+    // short-lived read URL for this reviewer rather than exposing the raw key.
+    const cnicUrl = app.cnic ? await this.s3Service.getSignedReadUrl(app.cnic) : null;
+
     return {
       data: {
         id: app._id.toString(),
@@ -271,7 +277,7 @@ export class AdminService {
         documents: {
           pvmcLicense: app.pvmcLicense,
           degreeCertificate: app.degreeCertificate,
-          cnic: app.cnic,
+          cnic: cnicUrl,
           clinicPhoto: app.clinicPhoto,
         },
         submittedAt: app.createdAt.toISOString(),

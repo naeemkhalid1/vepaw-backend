@@ -51,6 +51,8 @@ import {
   ConsultationSessionResponse,
   JwtPayload,
 } from '../../shared/types';
+import { S3Service } from '../../common/storage/s3.service';
+import { UpdateVetProfileDto } from './dto/update-vet-profile.dto';
 import { AddVisitNoteDto } from './dto/add-visit-note.dto';
 import { ReplyReviewDto } from './dto/reply-review.dto';
 import { InviteTeamMemberDto } from './dto/invite-team-member.dto';
@@ -157,7 +159,65 @@ export class VetPortalService {
     @InjectModel(ConsultationSession.name)
     private readonly consultationModel: Model<ConsultationSessionDocument>,
     private readonly chatGateway: ChatGateway,
+    private readonly s3Service: S3Service,
   ) {}
+
+  // ─── Profile ────────────────────────────────────────────
+  // Personal fields only — every staff member (admin_vet/team_vet/manager) is their own Vet
+  // document, so this works identically regardless of staffRole. Business-identity fields
+  // (clinicName/phone/address/payout) stay on the clinic-settings endpoint.
+
+  async getMyProfile(vetId: string): Promise<ServiceResponse<Record<string, unknown>>> {
+    const vet = await this.vetModel.findById(vetId).lean().exec();
+    if (!vet) throw new NotFoundException('Vet not found');
+
+    return {
+      data: {
+        name: vet.name,
+        photo: vet.photo,
+        about: vet.about,
+        specialty: vet.specialty,
+        yearsExperience: vet.yearsExperience,
+        languages: vet.languages,
+      },
+      message: 'Profile retrieved',
+    };
+  }
+
+  async updateMyProfile(
+    vetId: string,
+    dto: UpdateVetProfileDto,
+    photo?: Express.Multer.File,
+  ): Promise<ServiceResponse<Record<string, unknown>>> {
+    const update: Record<string, unknown> = {};
+    if (dto.name !== undefined) update.name = dto.name;
+    if (dto.about !== undefined) update.about = dto.about;
+    if (dto.specialty !== undefined) update.specialty = dto.specialty;
+    if (dto.yearsExperience !== undefined) {
+      const parsed = parseInt(dto.yearsExperience, 10);
+      if (!isNaN(parsed)) update.yearsExperience = parsed;
+    }
+    if (dto.languages !== undefined) update.languages = dto.languages;
+    if (photo) update.photo = await this.s3Service.uploadImage(photo, 'avatars');
+
+    const vet = await this.vetModel
+      .findByIdAndUpdate(vetId, { $set: update }, { new: true, runValidators: true })
+      .lean()
+      .exec();
+    if (!vet) throw new NotFoundException('Vet not found');
+
+    return {
+      data: {
+        name: vet.name,
+        photo: vet.photo,
+        about: vet.about,
+        specialty: vet.specialty,
+        yearsExperience: vet.yearsExperience,
+        languages: vet.languages,
+      },
+      message: 'Profile updated',
+    };
+  }
 
   // ─── Schedule ──────────────────────────────────────────
 
@@ -225,23 +285,133 @@ export class VetPortalService {
       .lean()
       .exec();
 
-    const mapped = appts.map((a) => ({
-      id: a._id.toString(),
-      patientId: a.pet.toString(),
-      date: a.date,
-      time: a.timeSlot,
-      duration: '30 min',
-      petName: a.petDetails.name,
-      ownerName: a.vetDetails.name,
-      ownerPhone: a.vetDetails.phone,
-      visitType: 'checkup',
-      status: this.toScheduleStatus(a.status),
-      paymentMethod: a.paymentMethod,
-      paymentStatus: a.paymentStatus,
-      payoutLabel: toPayoutLabel(a.paymentStatus, a.payoutEligibleAt),
-    }));
+    const ownerMap = await this.loadOwnerMap(appts.map((a) => a.owner));
+
+    const mapped = appts.map((a) => {
+      const owner = ownerMap.get(a.owner.toString());
+      return {
+        id: a._id.toString(),
+        patientId: a.pet.toString(),
+        date: a.date,
+        time: a.timeSlot,
+        duration: '30 min',
+        petName: a.petDetails.name,
+        ownerName: owner?.name ?? 'Owner',
+        ownerPhone: owner?.phone ?? null,
+        visitType: 'checkup',
+        status: this.toScheduleStatus(a.status),
+        paymentMethod: a.paymentMethod,
+        paymentStatus: a.paymentStatus,
+        payoutLabel: toPayoutLabel(a.paymentStatus, a.payoutEligibleAt),
+      };
+    });
 
     return { data: mapped, message: 'Appointments retrieved' };
+  }
+
+  // Was previously (incorrectly) reading vetDetails.name/phone for "owner" fields — that's the
+  // treating vet's own snapshot, not the pet owner's. Shared by getScheduleAppointments and
+  // getClinicScheduleAppointments so both look up the real owner the same way.
+  private async loadOwnerMap(ownerIds: Types.ObjectId[]): Promise<Map<string, { name: string; phone: string }>> {
+    const uniqueIds = [...new Set(ownerIds.map((id) => id.toString()))];
+    const owners = await this.userModel
+      .find({ _id: { $in: uniqueIds } })
+      .select('name phone')
+      .lean()
+      .exec();
+    return new Map(owners.map((o) => [(o._id as Types.ObjectId).toString(), { name: o.name, phone: o.phone }]));
+  }
+
+  // admin_vet/manager only (see @ClinicRoles on the controller route) — same shape as
+  // getScheduleStats but aggregated across every staff Vet in the clinic via
+  // resolveClinicVetIds, not just the caller's own bookings. Established practice-management
+  // platforms always pair a per-provider calendar with a front-desk/manager view like this one.
+  async getClinicScheduleStats(vetId: string): Promise<ServiceResponse<Record<string, unknown>>> {
+    const { vetIds } = await this.resolveClinicVetIds(vetId);
+    const today = karachiDateStr();
+    const startOfMonth = karachiStartOfMonth();
+
+    const [todayAppts, monthAppts] = await Promise.all([
+      this.appointmentModel.find({ vet: { $in: vetIds }, date: today }).lean().exec(),
+      this.appointmentModel.find({ vet: { $in: vetIds }, createdAt: { $gte: startOfMonth } }).lean().exec(),
+    ]);
+
+    const confirmed = todayAppts.filter((a) => a.status === 'confirmed' || a.status === 'in-progress').length;
+    const pending = todayAppts.filter((a) => a.status === 'pending').length;
+    const pendingEarnings = todayAppts.filter((a) => a.status !== 'cancelled').reduce((s, a) => s + a.vetPayout, 0);
+    const monthBookings = monthAppts.length;
+    const monthTotal = monthAppts.reduce((s, a) => s + a.fee, 0);
+
+    const ownerIds = [...new Set(monthAppts.map((a) => a.owner.toString()))];
+    const repeatOwners = ownerIds.filter((oid) => monthAppts.filter((a) => a.owner.toString() === oid).length > 1);
+
+    return {
+      data: {
+        staffCount: vetIds.length,
+        todayBookings: todayAppts.length,
+        confirmedCount: confirmed,
+        upcomingCount: pending,
+        pendingEarnings,
+        pendingEarningsLabel: `PKR ${pendingEarnings.toLocaleString()}`,
+        thisMonth: monthTotal,
+        thisMonthLabel: `PKR ${monthTotal.toLocaleString()}`,
+        thisMonthBookings: monthBookings,
+        thisMonthCommission: `PKR ${monthAppts.reduce((s, a) => s + a.platformCommission, 0).toLocaleString()} commission`,
+        repeatClients: ownerIds.length > 0 ? `${Math.round((repeatOwners.length / ownerIds.length) * 100)}%` : '0%',
+        repeatClientsSubtitle: 'returning this month',
+      },
+      message: 'Clinic schedule stats retrieved',
+    };
+  }
+
+  // admin_vet/manager only — same as getScheduleAppointments but across every staff Vet in the
+  // clinic, with each row tagged with which staff member it belongs to so a front-desk view can
+  // tell whose patient is whose.
+  async getClinicScheduleAppointments(
+    vetId: string,
+    range: { startDate?: string; endDate?: string },
+  ): Promise<ServiceResponse<Record<string, unknown>[]>> {
+    const { vetIds } = await this.resolveClinicVetIds(vetId);
+    const today = karachiDateStr();
+    const startDate = range.startDate ?? today;
+    const endDate = range.endDate ?? startDate;
+
+    if (endDate < startDate) {
+      throw new BadRequestException({ message: 'endDate must not be before startDate', code: 'INVALID_DATE_RANGE' });
+    }
+
+    const appts = await this.appointmentModel
+      .find({ vet: { $in: vetIds }, date: { $gte: startDate, $lte: endDate } })
+      .sort({ date: 1, timeSlot: 1 })
+      .lean()
+      .exec();
+
+    const staffVets = await this.vetModel.find({ _id: { $in: vetIds } }).select('name').lean().exec();
+    const staffNames = new Map(staffVets.map((v) => [(v._id as Types.ObjectId).toString(), v.name]));
+    const ownerMap = await this.loadOwnerMap(appts.map((a) => a.owner));
+
+    const mapped = appts.map((a) => {
+      const owner = ownerMap.get(a.owner.toString());
+      return {
+        id: a._id.toString(),
+        patientId: a.pet.toString(),
+        date: a.date,
+        time: a.timeSlot,
+        duration: '30 min',
+        petName: a.petDetails.name,
+        ownerName: owner?.name ?? 'Owner',
+        ownerPhone: owner?.phone ?? null,
+        staffVetId: a.vet.toString(),
+        staffVetName: staffNames.get(a.vet.toString()) ?? 'Unknown',
+        visitType: 'checkup',
+        status: this.toScheduleStatus(a.status),
+        paymentMethod: a.paymentMethod,
+        paymentStatus: a.paymentStatus,
+        payoutLabel: toPayoutLabel(a.paymentStatus, a.payoutEligibleAt),
+      };
+    });
+
+    return { data: mapped, message: 'Clinic appointments retrieved' };
   }
 
   // Maps the DB status enum ('pending'|'confirmed'|'in-progress'|'completed'|'cancelled'|'no-show'|'disputed') to the
@@ -577,6 +747,7 @@ export class VetPortalService {
       date: p.date,
       method: p.method,
       amount: `PKR ${p.amount.toLocaleString()}`,
+      status: p.status,
     }));
 
     return { data: mapped, message: 'Payouts retrieved' };
@@ -1044,6 +1215,16 @@ export class VetPortalService {
       });
     }
 
+    // Business identity (clinic name/phone/address) — admin_vet/manager owned, same gate as
+    // payout above. Personal identity (name/photo/about/specialty) lives on /vet/profile/me
+    // instead, which every staff member can edit for themselves regardless of staffRole.
+    if (dto.profile && user.staffRole && !['admin_vet', 'manager'].includes(user.staffRole)) {
+      throw new ForbiddenException({
+        message: 'Only the clinic admin or manager can update clinic profile details',
+        code: 'FORBIDDEN',
+      });
+    }
+
     if (dto.profile) {
       vet.clinicName = dto.profile.clinicName;
       vet.phone = dto.profile.phone;
@@ -1109,6 +1290,30 @@ export class VetPortalService {
     }
 
     await vet.save();
+
+    // Cascade business identity to every other staff Vet document in the same clinic, so the
+    // whole clinic stays in sync with whatever admin_vet/manager just set here — the gate above
+    // already ensures only they can reach this point. A solo vet (no clinic-mates) is a no-op.
+    if (dto.profile) {
+      const { vetIds } = await this.resolveClinicVetIds(vetId);
+      const clinicMateIds = vetIds.filter((id) => id.toString() !== vetId);
+      if (clinicMateIds.length > 0) {
+        await this.vetModel
+          .updateMany(
+            { _id: { $in: clinicMateIds } },
+            {
+              $set: {
+                clinicName: dto.profile.clinicName,
+                phone: dto.profile.phone,
+                address: dto.profile.fullAddress,
+                city: dto.profile.city,
+                area: dto.profile.area,
+              },
+            },
+          )
+          .exec();
+      }
+    }
 
     return { data: null, message: 'Settings updated' };
   }
@@ -1445,8 +1650,25 @@ export class VetPortalService {
     return { data: { success: true, message: 'Application submitted for review' }, message: 'Application submitted' };
   }
 
-  async uploadFile(file: Express.Multer.File): Promise<ServiceResponse<{ name: string; status: string }>> {
-    return { data: { name: file.originalname, status: 'uploaded' }, message: 'File uploaded' };
+  // documentType drives storage policy: 'cnic' is government ID and goes to private storage
+  // (returned reference is an S3 key, not a browsable URL — pair with getSignedReadUrl at
+  // read time). Everything else (pvmcLicense/degreeCertificate/clinicPhoto) is a public URL
+  // under the 'uploads' prefix — the bucket's policy only grants public s3:GetObject on a fixed
+  // set of prefixes (uploads/, pets/, avatars/), so a new prefix here would 403 despite looking
+  // like a valid URL; reusing 'uploads' needs no bucket-policy change. The returned `name` is
+  // what onboarding draft/submit/admin-review flows already persist verbatim as the document
+  // reference — kept as `name` rather than renaming to `url`/`key` to avoid touching that
+  // existing contract.
+  async uploadFile(
+    file: Express.Multer.File,
+    documentType?: string,
+  ): Promise<ServiceResponse<{ name: string; status: string }>> {
+    const reference =
+      documentType === 'cnic'
+        ? await this.s3Service.uploadPrivateImage(file, 'vet-cnic')
+        : await this.s3Service.uploadImage(file, 'uploads');
+
+    return { data: { name: reference, status: 'uploaded' }, message: 'File uploaded' };
   }
 
   // ─── Invite ───────────────────────────────────────────
@@ -1519,7 +1741,7 @@ export class VetPortalService {
 
   // ─── Missing Endpoints ────────────────────────────────
 
-  async updateAppointmentStatus(vetId: string, appointmentId: string, status: string): Promise<ServiceResponse<null>> {
+  async updateAppointmentStatus(user: JwtPayload, appointmentId: string, status: string): Promise<ServiceResponse<null>> {
     const statusMap: Record<string, 'pending' | 'confirmed' | 'in-progress' | 'completed' | 'cancelled' | 'no-show'> = {
       confirmed: 'confirmed',
       inProgress: 'in-progress',
@@ -1532,10 +1754,17 @@ export class VetPortalService {
       throw new BadRequestException({ message: 'Invalid appointment status', code: 'INVALID_STATUS' });
     }
 
+    // admin_vet/manager can act on any clinic-mate's appointment (same front-desk pattern as
+    // getClinicScheduleAppointments) — a plain team_vet can only act on their own.
+    const canManageClinic = user.staffRole != null && ['admin_vet', 'manager'].includes(user.staffRole);
+    const vetFilter = canManageClinic
+      ? { $in: (await this.resolveClinicVetIds(user.sub)).vetIds }
+      : new Types.ObjectId(user.sub);
+
     const appt = await this.appointmentModel
       .findOne({
         _id: new Types.ObjectId(appointmentId),
-        vet: new Types.ObjectId(vetId),
+        vet: vetFilter,
       })
       .exec();
     if (!appt) throw new NotFoundException('Appointment not found');

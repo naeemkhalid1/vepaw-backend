@@ -444,6 +444,7 @@ export class StorePortalService {
       gross: p.gross,
       commission: p.commission,
       netPaid: p.netPaid,
+      status: p.status,
     }));
 
     return { data: mapped, message: 'Payouts retrieved' };

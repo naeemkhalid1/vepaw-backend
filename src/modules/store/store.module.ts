@@ -6,6 +6,7 @@ import { StoreService } from './store.service';
 import { Product, ProductSchema } from '../../database/schemas/product.schema';
 import { Order, OrderSchema } from '../../database/schemas/order.schema';
 import { User, UserSchema } from '../../database/schemas/user.schema';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { User, UserSchema } from '../../database/schemas/user.schema';
       { name: Order.name, schema: OrderSchema },
       { name: User.name, schema: UserSchema },
     ]),
+    NotificationsModule,
   ],
   controllers: [StoreController, StoreOrdersWebhookController],
   providers: [StoreService],

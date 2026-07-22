@@ -12,6 +12,8 @@ import { Clinic, ClinicSchema } from '../../database/schemas/clinic.schema';
 import { ClinicTeamModule } from '../../common/vets/clinic-team.module';
 import { PaymentsModule } from '../../common/payments/payments.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { ConsultationsModule } from '../consultations/consultations.module';
+import { StoreModule } from '../store/store.module';
 import { AppointmentsController } from './appointments.controller';
 import { AppointmentsWebhookController } from './appointments-webhook.controller';
 import { AppointmentsService } from './appointments.service';
@@ -32,6 +34,8 @@ import { AppointmentsService } from './appointments.service';
     ClinicTeamModule,
     PaymentsModule,
     NotificationsModule,
+    ConsultationsModule,
+    StoreModule,
   ],
   controllers: [AppointmentsController, AppointmentsWebhookController],
   providers: [AppointmentsService],

@@ -84,6 +84,12 @@ export class Order {
   @Prop({ type: String, default: null })
   paymentReference: string | null;
 
+  // Set when the Safepay webhook marks this order paid — anchors the auto-cancel-and-refund
+  // cron's confirmation-timeout window, rather than relying on the generic updatedAt (which any
+  // future order-mutating code could bump for unrelated reasons).
+  @Prop({ type: Date, default: null })
+  paidAt: Date | null;
+
   // Set once this order's storePayout has been included in a batched Payout — excludes it from
   // future "available to withdraw" totals so it can't be paid out twice.
   @Prop({ type: Types.ObjectId, ref: 'Payout', default: null })

@@ -104,6 +104,26 @@ export class SafepayService {
     return { trackerToken, checkoutUrl };
   }
 
+  // Full refund of a completed payment, keyed by the same tracker token stored as
+  // paymentReference on the domain record (Order/Appointment/ConsultationSession). Confirmed
+  // live against sandbox: Safepay's refund endpoint rejects the request outright ("amount:
+  // cannot be blank; currency: cannot be blank") unless both are supplied explicitly — there is
+  // no implicit "omit for full refund" — so amountPKR is required and converted to paisas here,
+  // same convention as createCheckoutSession.
+  async refundPayment(trackerToken: string, amountPKR: number): Promise<void> {
+    try {
+      await this.client.order.cancel.refund(trackerToken, {
+        amount: Math.round(amountPKR * 100),
+        currency: CURRENCY,
+      });
+    } catch (err) {
+      this.logger.error(
+        `Safepay refund failed for tracker ${trackerToken}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw err;
+    }
+  }
+
   // Safepay signs the exact raw request bytes (SHA-512 HMAC) — must be checked against the
   // untouched body, before any JSON re-serialization, or the signature will never match.
   verifyWebhookSignature(

@@ -303,6 +303,14 @@ export class ConsultationsService {
     this.logger.log(`Ignoring unhandled Safepay event type: ${event.type}`);
   }
 
+  // Routing check for the shared Safepay webhook entry point (appointments controller owns the
+  // single endpoint Safepay actually delivers to, see AppointmentsWebhookController) — lets it
+  // find out this event belongs to a consultation before delegating to handleSafepayEvent above.
+  async ownsOrderId(orderId: string): Promise<boolean> {
+    if (!Types.ObjectId.isValid(orderId)) return false;
+    return (await this.consultationModel.exists({ _id: orderId })) !== null;
+  }
+
   @Cron(CronExpression.EVERY_HOUR)
   async expireStaleConsultations(): Promise<void> {
     const stale = await this.consultationModel

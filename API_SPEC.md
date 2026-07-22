@@ -102,15 +102,19 @@ Accept-Language: en   // or "ur"
 | GET | `/vets/:id` | YES | Vet detail |
 | GET | `/vets/:id/availability` | YES | Time slot availability |
 | GET | `/vets/:id/reviews` | YES | Vet reviews |
-| POST | `/appointments` | YES | Create appointment |
+| POST | `/appointments` | YES | Create appointment — `cod` only, no payment step |
+| POST | `/appointments/reservations` | YES | Reserve slot + create Safepay checkout session — `safepay` only |
 | GET | `/appointments` | YES | List my appointments |
-| GET | `/appointments/:id` | YES | Appointment detail |
+| GET | `/appointments/:id` | YES | Appointment detail (poll after Safepay redirect until it resolves) |
 | PATCH | `/appointments/:id/complete` | YES | Mark completed (vet side) |
 | PATCH | `/appointments/:id/cancel` | YES | Cancel appointment |
 | POST | `/appointments/:id/review` | YES | Submit star rating |
-| POST | `/payments/jazzcash/initiate` | YES | Start JazzCash payment |
-| POST | `/payments/easypaisa/initiate` | YES | Start EasyPaisa payment |
-| POST | `/payments/jazzcash/callback` | NO | JazzCash webhook (server→server) |
+| POST | `/appointments/webhooks/safepay` | NO | Safepay webhook (server→server) — see §8 |
+| POST | `/consultations` | YES | Start paid text consultation — Safepay checkout, see §8 |
+| POST | `/consultations/:id/cancel` | YES | Cancel — only while awaiting payment |
+| GET | `/consultations` | YES | List my consultation sessions |
+| GET | `/consultations/:id` | YES | Consultation session detail |
+| POST | `/consultations/webhooks/safepay` | NO | Safepay webhook (server→server) |
 | GET | `/store/products` | YES | Product list (+ filter) |
 | GET | `/store/products/:id` | YES | Product detail |
 | POST | `/store/orders` | YES | Place order |
@@ -463,7 +467,9 @@ Query params: `page` (default 1), `limit` (default 10)
 
 ## Section 7 — Appointments
 
-### 7.1 POST `/appointments`
+**Note (2026-07-21):** `paymentMethod` is now `"safepay" | "cod"` only — `"jazzcash"`/`"easypaisa"` no longer exist anywhere in the system (see §8). The two payment methods use **different endpoints**, not the same one with a different body value.
+
+### 7.1 POST `/appointments` — `cod` only
 **Request:**
 ```json
 {
@@ -471,19 +477,31 @@ Query params: `page` (default 1), `limit` (default 10)
   "petId": "pet_001",
   "date": "2026-06-20",
   "timeSlot": "11:00",
-  "paymentMethod": "jazzcash",
+  "paymentMethod": "cod",
   "fee": 1500
 }
 ```
-- `paymentMethod`: `"jazzcash" | "easypaisa" | "cod"`
 - `fee`: must match vet's fee — validated server-side, never trust client
 
-**Response 201:** Full Appointment object (see data model)
+**Response 201:** Full Appointment object (see data model), `status: "pending"` immediately — no payment step.
 
 **Errors:**
 - 422 `SLOT_UNAVAILABLE` — slot already booked
 
-**Rules:** Lock slot immediately. `platformCommission` is configurable server-side. `vetPayout = fee - platformCommission`.
+**Rules:** Lock slot immediately. `platformCommission` is a percentage of `fee` (currently 10%, launch-phase rate, expected to rise — see `CODING_STANDARDS.md` §D), computed once at creation and never recalculated. `vetPayout = fee - platformCommission`.
+
+---
+
+### 7.1b POST `/appointments/reservations` — `safepay` only
+**Request:** same shape as 7.1, `paymentMethod: "safepay"` (no `date`/`timeSlot` change, same fields otherwise).
+
+**Response 201:**
+```json
+{ "data": { "id": "...", "fee": 1500, "platformCommission": 150, "checkoutUrl": "https://sandbox.api.getsafepay.com/...", "...": "reservation fields" } }
+```
+Open `checkoutUrl` in a webview. This creates a 15-minute soft-lock on the slot (`AppointmentReservation`), not the final `Appointment` yet — poll `GET /appointments/:id` with the same `id` after the checkout redirect; it resolves into the real appointment once Safepay's webhook confirms payment, or the reservation silently expires (slot freed, nothing to poll) if abandoned.
+
+**Errors:** same `SLOT_UNAVAILABLE` as 7.1.
 
 ---
 
@@ -507,36 +525,20 @@ Query params: `page` (default 1), `limit` (default 10)
 
 ---
 
-## Section 8 — Payments
+## Section 8 — Payments (Safepay — rewritten 2026-07-21, JazzCash/EasyPaisa fully removed)
 
-### 8.1 POST `/payments/jazzcash/initiate`
-**Request:**
-```json
-{ "appointmentId": "appt_001", "amount": 1500, "phone": "03001234567" }
-```
-**Response 200:**
-```json
-{ "success": true, "data": { "paymentUrl": "https://sandbox.jazzcash.com.pk/...", "txnRefNo": "T20260617123456" } }
-```
+There is no client-callable "initiate payment" endpoint anymore. Instead, the endpoint that creates the thing you're paying for (`POST /appointments/reservations`, `POST /consultations`, `POST /mobile/store/orders` with `paymentMethod: "safepay"`) directly returns a `checkoutUrl` in its response — open it in a webview, same pattern across all three flows.
 
----
+**Webhook (server-to-server, not called by the app):**
+- `POST /appointments/webhooks/safepay`
+- `POST /consultations/webhooks/safepay`
+- `POST /mobile/store/orders/webhooks/safepay`
 
-### 8.2 POST `/payments/easypaisa/initiate`
-**Request:**
-```json
-{ "appointmentId": "appt_001", "amount": 1500, "phone": "03001234567" }
-```
-**Response 200:**
-```json
-{ "success": true, "data": { "paymentUrl": "https://easypay.easypaisa.com.pk/...", "transactionId": "EP20260617123456" } }
-```
+Each verifies Safepay's `x-sfpy-signature` header (HMAC over the raw request body) before processing. On `payment.succeeded`, the pending reservation/session/order is confirmed (exact effect differs per flow — see §7, the Consultations section, and §9/Store). On `payment.failed`, it's cancelled. All three are idempotent — a duplicate webhook delivery is a safe no-op.
 
----
+**Don't rely solely on the webview's redirect callback firing** to know payment succeeded — poll the relevant `GET .../:id` endpoint or listen for the corresponding push/socket event, since a vet/store can also manually confirm payment through their own portal in some flows (e.g. consultations), and the redirect isn't guaranteed to always complete cleanly client-side.
 
-### 8.3 POST `/payments/jazzcash/callback`
-Auth: NO (server-to-server webhook)
-
-**Rules:** Validate HMAC signature. On success → `appointment.paymentStatus = "held"`. On failure → `appointment.status = "cancelled"`. Trigger FCM push.
+**Abandoned checkout:** if the app opens a `checkoutUrl` and the user never completes or explicitly cancels it, the pending reservation/session/order auto-cancels server-side after **15 minutes** (hourly sweep) — don't build a UI that waits indefinitely.
 
 ---
 
@@ -567,7 +569,7 @@ Query params: `category`, `petType`, `q`, `page` (default 1), `limit` (default 2
     { "product": "prod_001", "name": "Royal Canin Persian Adult", "photo": "https://...", "qty": 1, "price": 4250 }
   ],
   "totalAmount": 4250,
-  "paymentMethod": "jazzcash",
+  "paymentMethod": "safepay",
   "deliveryAddress": {
     "street": "House 12, A Block",
     "area": "DHA Phase 5",
@@ -576,16 +578,18 @@ Query params: `category`, `petType`, `q`, `page` (default 1), `limit` (default 2
   }
 }
 ```
-- `paymentMethod`: `"jazzcash" | "easypaisa" | "cod"`
+- `paymentMethod`: `"safepay" | "cod"` (2026-07-21 — `"jazzcash"`/`"easypaisa"` removed, see §8)
 - `deliveryAddress.label`: `"Home" | "Work" | "Other" | null`
 
 **Validation:** All items must belong to the same store. `totalAmount` must match sum of `qty × price`.
 
-**Response 201:** Full Order object
+**Response 201:** Full Order object, plus `checkoutUrl` (open in webview) when `paymentMethod: "safepay"` — `null` for `cod`. See §8 for the Safepay flow.
 
 **Errors:**
 - 422 `ITEM_OUT_OF_STOCK`
 - 422 `TOTAL_MISMATCH`
+
+**Note (2026-07-21):** a `safepay` order won't appear in the store's own order-management queue until payment is confirmed (`paymentStatus: "paid"`) — don't expect the store to see or act on it before then.
 
 ---
 
@@ -821,11 +825,13 @@ featured (bool), createdAt
 ### Appointment
 ```
 id, pet, vet, owner, date (YYYY-MM-DD), timeSlot (HH:MM),
-status ("pending"|"confirmed"|"completed"|"cancelled"|"no-show"),
-fee (PKR int), platformCommission (PKR int), vetPayout (PKR int),
-paymentMethod ("jazzcash"|"easypaisa"|"cod"),
+status ("pending"|"confirmed"|"in-progress"|"completed"|"cancelled"|"no-show"|"disputed"),
+fee (PKR int), platformCommission (PKR int, 10% of fee as of 2026-07-21), vetPayout (PKR int),
+paymentMethod ("safepay"|"cod") — "jazzcash"|"easypaisa" removed 2026-07-21,
 paymentStatus ("pending"|"held"|"released"|"refunded"),
-paymentReference?, notes?, reviewId?,
+paymentReference?, checkoutUrl? (only present in the reservation-creation response, see §7.1b),
+payoutEligibleAt? (Date — set 3h after completion for safepay appointments; when this passes, escrow releases to the vet),
+disputeReason?, notes?, reviewId?,
 vetDetails { name, clinicName, address, phone },
 petDetails { name, species },
 createdAt, updatedAt
@@ -835,10 +841,11 @@ createdAt, updatedAt
 ```
 id (e.g. "PC-2398"), user, store, storeName,
 items (OrderItem[]) { product, name, photo, qty, price (PKR int) },
-totalAmount (PKR int), platformCommission (PKR int), storePayout (PKR int),
+totalAmount (PKR int), platformCommission (PKR int, 10% of total as of 2026-07-21), storePayout (PKR int),
 status ("pending"|"confirmed"|"packed"|"dispatched"|"delivered"|"cancelled"),
-paymentMethod ("jazzcash"|"easypaisa"|"cod"),
+paymentMethod ("safepay"|"cod") — "jazzcash"|"easypaisa" removed 2026-07-21,
 paymentStatus ("pending"|"paid"|"refunded"),
+paymentReference?, checkoutUrl? (only present in the place-order response when paymentMethod is safepay),
 deliveryAddress { street, area, city, label ("Home"|"Work"|"Other") },
 isSubscription (bool), nextOrderDate?,
 estimatedDelivery (string)?, rider { name, phone }?,
@@ -914,9 +921,9 @@ Validate on `POST /store/orders` that all items belong to the same store.
 `GET /store/orders/:id` is polled every 30 seconds — must be fast. Cache if needed.
 
 ### Commission
-- Appointments: fixed PKR amount (configurable server-side constant)
-- Store orders: currently 0 PKR commission
-- Always store `platformCommission` + `vetPayout`/`storePayout` on every transaction
+- **2026-07-21:** percentage-based across all three revenue streams — appointments, paid consultations, and store orders all currently charge **10%** of the transaction value, computed once at creation/booking time and never recalculated afterward. This is a deliberate launch-phase rate kept low to attract initial vets/stores, expected to rise later — check `CODING_STANDARDS.md` §D for the current constants (`PLATFORM_COMMISSION_RATE`, `CONSULTATION_COMMISSION_RATE`, `STORE_COMMISSION_RATE`) before assuming this number if you're relying on it client-side.
+- This is independent of whatever fee Safepay itself takes for processing — that's deducted on Safepay's side during settlement and never affects `platformCommission`, `vetPayout`, or `storePayout`.
+- Always store `platformCommission` + `vetPayout`/`storePayout` on every transaction (now also true for `ConsultationSession`, which didn't have these fields before 2026-07-21).
 
 ### Vaccination Auto-Update (Cron)
 When a vaccination's `nextDue` date passes, set `pet.vaccinationStatus = "some_pending"` via scheduled job.

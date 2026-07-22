@@ -498,6 +498,14 @@ export class AppointmentsService {
     this.logger.log(`Ignoring unhandled Safepay event type: ${event.type}`);
   }
 
+  // Routing check for the shared Safepay webhook entry point (this module's controller is the
+  // single endpoint Safepay actually delivers to — see AppointmentsWebhookController) — lets it
+  // find out an event belongs to a reservation before delegating to handleSafepayEvent above.
+  async ownsOrderId(orderId: string): Promise<boolean> {
+    if (!Types.ObjectId.isValid(orderId)) return false;
+    return (await this.reservationModel.exists({ _id: orderId })) !== null;
+  }
+
   async listAppointments(
     userId: string,
     dto: ListAppointmentsDto,

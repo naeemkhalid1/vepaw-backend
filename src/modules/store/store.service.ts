@@ -21,6 +21,7 @@ import {
   extractOrderId,
   extractAmount,
 } from '../../common/payments/safepay-webhook-event.interface';
+import { NotificationsService } from '../notifications/notifications.service';
 
 const TERMINAL_STATUSES = new Set(['delivered', 'cancelled']);
 
@@ -41,6 +42,14 @@ const STORE_COMMISSION_RATE = 0.1;
 // before we give up and cancel it, so it doesn't sit in the order list forever.
 const ORDER_PENDING_PAYMENT_TIMEOUT_MINUTES = 15;
 
+// How long a *paid* order can sit unconfirmed by the store before we give up on the store ever
+// acting, auto-cancel it, and refund the customer — established-marketplace safety net (mirrors
+// Foodpanda/Daraz-style confirmation SLAs) that this platform otherwise lacked entirely: without
+// this, a paid order the store ignores just sits in limbo forever with no resolution. Chosen as
+// 6 hours to survive a single store-owner off-hours/overnight gap while still resolving same-day
+// for orders placed in the morning.
+const ORDER_CONFIRMATION_TIMEOUT_HOURS = 6;
+
 @Injectable()
 export class StoreService {
   private readonly logger = new Logger(StoreService.name);
@@ -50,6 +59,7 @@ export class StoreService {
     @InjectModel(Order.name) private readonly orderModel: Model<OrderDocument>,
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     private readonly safepayService: SafepayService,
+    private readonly notificationsService: NotificationsService,
     private readonly config: ConfigService,
   ) {}
 
@@ -385,7 +395,7 @@ export class StoreService {
       const updated = await this.orderModel
         .findOneAndUpdate(
           { _id: orderObjectId, paymentStatus: 'pending' },
-          { $set: { paymentStatus: 'paid' } },
+          { $set: { paymentStatus: 'paid', paidAt: new Date() } },
           { new: true },
         )
         .exec();
@@ -412,6 +422,14 @@ export class StoreService {
     this.logger.log(`Ignoring unhandled Safepay event type: ${event.type}`);
   }
 
+  // Routing check for the shared Safepay webhook entry point (appointments controller owns the
+  // single endpoint Safepay actually delivers to, see AppointmentsWebhookController) — lets it
+  // find out this event belongs to a store order before delegating to handleSafepayEvent above.
+  async ownsOrderId(orderId: string): Promise<boolean> {
+    if (!Types.ObjectId.isValid(orderId)) return false;
+    return (await this.orderModel.exists({ _id: orderId })) !== null;
+  }
+
   // Owner opened Safepay checkout and never completed, failed, or explicitly cancelled it —
   // same abandoned-checkout cleanup pattern as appointments/consultations, so a stale order
   // doesn't sit in the customer's order list forever.
@@ -432,6 +450,69 @@ export class StoreService {
 
     if (result.modifiedCount > 0) {
       this.logger.log(`Cancelled ${result.modifiedCount} abandoned pending-payment order(s)`);
+    }
+  }
+
+  // Store owner never confirmed a paid order within ORDER_CONFIRMATION_TIMEOUT_HOURS — the
+  // established-marketplace safety net this platform was otherwise missing entirely (see
+  // ORDER_CONFIRMATION_TIMEOUT_HOURS comment). Auto-cancels and refunds via Safepay so the
+  // customer's money doesn't sit in limbo indefinitely just because a store went unresponsive.
+  @Cron(CronExpression.EVERY_HOUR)
+  async autoCancelUnconfirmedPaidOrders(): Promise<void> {
+    const cutoff = new Date(Date.now() - ORDER_CONFIRMATION_TIMEOUT_HOURS * 60 * 60 * 1000);
+    const stale = await this.orderModel
+      .find({
+        paymentMethod: 'safepay',
+        paymentStatus: 'paid',
+        status: 'pending',
+        paidAt: { $lt: cutoff },
+      })
+      .exec();
+
+    let processed = 0;
+    for (const order of stale) {
+      if (!order.paymentReference) {
+        this.logger.error(`Auto-cancel: paid safepay order ${order._id.toString()} has no paymentReference, skipping`);
+        continue;
+      }
+
+      // Atomically claim before calling the external refund API — if the store confirmed this
+      // order in the moment between our find() and this update, status won't be 'pending'
+      // anymore and this no-ops, so we never refund an order that was legitimately actioned.
+      const claimed = await this.orderModel
+        .findOneAndUpdate(
+          { _id: order._id, paymentStatus: 'paid', status: 'pending' },
+          { $set: { paymentStatus: 'refunded', status: 'cancelled' } },
+          { new: true },
+        )
+        .exec();
+      if (!claimed) continue;
+
+      try {
+        await this.safepayService.refundPayment(order.paymentReference, order.totalAmount);
+      } catch {
+        // Refund call failed — revert the claim so the next hourly tick retries, rather than
+        // leaving the order marked 'refunded' while no money actually moved.
+        await this.orderModel
+          .updateOne({ _id: order._id }, { $set: { paymentStatus: 'paid', status: 'pending' } })
+          .exec();
+        this.logger.error(`Auto-cancel: Safepay refund failed for order ${order._id.toString()}, reverted for retry`);
+        continue;
+      }
+
+      await this.notificationsService.createForRecipients(
+        [order.user as Types.ObjectId],
+        'user',
+        'order_cancelled',
+        'Order cancelled and refunded',
+        `Your order ${order.orderId} wasn't confirmed by the store in time — PKR ${order.totalAmount} has been refunded.`,
+        (order._id as Types.ObjectId).toString(),
+      );
+      processed++;
+    }
+
+    if (processed > 0) {
+      this.logger.log(`Auto-cancelled and refunded ${processed} unconfirmed paid order(s)`);
     }
   }
 }

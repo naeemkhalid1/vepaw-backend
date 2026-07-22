@@ -80,8 +80,11 @@ Each feature module follows the same internal shape: `*.controller.ts`, `*.servi
 
 **Note (2026-07-21): this section describes the original design intent (a separate BullMQ worker process). That was never kept — the codebase now runs scheduled work in-process via `@nestjs/schedule` `@Cron` decorators directly on domain services.** No queue/worker process exists; `src/jobs/*.processor.ts` are orphaned leftovers from the original design, referenced nowhere. Jobs actually running today:
 - `AppointmentsService.markStaleAppointmentsNoShow()` / `releaseEligiblePayouts()` — hourly
-- `ConsultationsService.expireStaleConsultations()` — hourly
+- `ConsultationsService.expireStaleConsultations()` — hourly (24h active-session timeout)
+- `ConsultationsService.cancelAbandonedPendingPaymentConsultations()` — hourly, cancels sessions stuck `pending_payment` past 15 minutes (added 2026-07-21)
+- `StoreService.cancelAbandonedPendingPaymentOrders()` — hourly, same 15-minute abandoned-checkout cleanup for `safepay` orders (added 2026-07-21)
 - `VetPortalService.autoBatchWeeklyPayouts()` — every Monday 00:00 Asia/Karachi (pinned via `@Cron(..., { timeZone: 'Asia/Karachi' })`) — auto-creates a pending `Payout` for every clinic with a released, unpaid balance
+- `StorePortalService.autoBatchWeeklyStorePayouts()` — same Monday 00:00 Asia/Karachi window, store equivalent (added 2026-07-21) — simpler than the vet version since a `Store` is single-entity, no clinic-style multi-staff aggregation needed
 
 Still not implemented anywhere: vaccination status auto-update, vaccination-due-in-7-days reminder push, FCM push dispatch (no `firebase-admin` dependency exists), pet passport PDF generation.
 

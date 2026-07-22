@@ -31,7 +31,10 @@ import { DisputeConsultationDto } from './dto/dispute-consultation.dto';
 import { CreateListingDto } from './dto/create-listing.dto';
 import { UpdateListingDto } from './dto/update-listing.dto';
 import { UpdateClinicSettingsDto } from './dto/update-clinic-settings.dto';
+import { UpdateVetProfileDto } from './dto/update-vet-profile.dto';
+import { imageUploadOptions } from '../../common/storage/image-upload.options';
 import { BlockSlotsDto } from './dto/block-slots.dto';
+import { UploadOnboardingDocumentDto } from './dto/upload-onboarding-document.dto';
 import { BlockDayDto } from './dto/block-day.dto';
 import { SubmitOnboardingDto } from './dto/submit-onboarding.dto';
 import { AcceptVetInviteDto } from './dto/accept-vet-invite.dto';
@@ -72,11 +75,25 @@ export class VetScheduleController {
     return this.service.getNextPatient(user.sub);
   }
 
+  @Get('clinic/stats')
+  @ClinicRoles('admin_vet', 'manager')
+  @ApiOperation({ summary: 'Clinic-wide schedule stats across every staff vet' })
+  getClinicStats(@CurrentUser() user: JwtPayload) {
+    return this.service.getClinicScheduleStats(user.sub);
+  }
+
+  @Get('clinic')
+  @ClinicRoles('admin_vet', 'manager')
+  @ApiOperation({ summary: 'Clinic-wide appointments across every staff vet — defaults to today if no range is given' })
+  getClinicAppointments(@CurrentUser() user: JwtPayload, @Query() dto: GetScheduleAppointmentsDto) {
+    return this.service.getClinicScheduleAppointments(user.sub, dto);
+  }
+
   @Post('appointments/:id/status')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Update appointment status' })
   updateAppointmentStatus(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: UpdateAppointmentStatusDto) {
-    return this.service.updateAppointmentStatus(user.sub, id, dto.status);
+    return this.service.updateAppointmentStatus(user, id, dto.status);
   }
 }
 
@@ -386,6 +403,38 @@ export class VetClinicSettingsController {
   }
 }
 
+// ─── Profile ────────────────────────────────────────────
+// Personal fields only (name/photo/about/specialty/yearsExperience/languages) — deliberately no
+// @ClinicRoles restriction, same behavior for admin_vet/team_vet/manager since each is editing
+// only their own Vet document. Business identity (clinicName/phone/address) stays under
+// vet/clinic-settings above.
+
+@ApiTags('vet-profile')
+@Controller('vet/profile')
+@ApiBearerAuth()
+@Roles('vet')
+export class VetProfileController {
+  constructor(private readonly service: VetPortalService) {}
+
+  @Get('me')
+  @ApiOperation({ summary: 'Get my own profile' })
+  getMyProfile(@CurrentUser() user: JwtPayload) {
+    return this.service.getMyProfile(user.sub);
+  }
+
+  @Patch('me')
+  @UseInterceptors(FileInterceptor('photo', imageUploadOptions))
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({ summary: 'Update my own profile — all fields optional' })
+  updateMyProfile(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: UpdateVetProfileDto,
+    @UploadedFile() photo?: Express.Multer.File,
+  ) {
+    return this.service.updateMyProfile(user.sub, dto, photo);
+  }
+}
+
 // ─── Availability ──────────────────────────────────────
 
 @ApiTags('vet-availability')
@@ -457,8 +506,8 @@ export class VetOnboardingController {
   @UseInterceptors(FileInterceptor('file'))
   @ApiConsumes('multipart/form-data')
   @ApiOperation({ summary: 'Upload onboarding document' })
-  upload(@UploadedFile() file: Express.Multer.File) {
-    return this.service.uploadFile(file);
+  upload(@UploadedFile() file: Express.Multer.File, @Body() dto: UploadOnboardingDocumentDto) {
+    return this.service.uploadFile(file, dto.documentType);
   }
 }
 
