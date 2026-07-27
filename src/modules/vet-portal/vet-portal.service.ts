@@ -52,6 +52,7 @@ import {
   JwtPayload,
 } from '../../shared/types';
 import { S3Service } from '../../common/storage/s3.service';
+import { BrevoEmailService } from '../../common/email/brevo-email.service';
 import { UpdateVetProfileDto } from './dto/update-vet-profile.dto';
 import { AddVisitNoteDto } from './dto/add-visit-note.dto';
 import { ReplyReviewDto } from './dto/reply-review.dto';
@@ -160,6 +161,7 @@ export class VetPortalService {
     private readonly consultationModel: Model<ConsultationSessionDocument>,
     private readonly chatGateway: ChatGateway,
     private readonly s3Service: S3Service,
+    private readonly emailService: BrevoEmailService,
   ) {}
 
   // ─── Profile ────────────────────────────────────────────
@@ -918,6 +920,10 @@ export class VetPortalService {
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 7);
 
+    const inviteEmail = dto.emailOrPhone.includes('@')
+      ? dto.emailOrPhone
+      : null;
+
     await this.inviteModel.create({
       token,
       entityType: 'vet',
@@ -928,10 +934,24 @@ export class VetPortalService {
       inviteeName: dto.emailOrPhone,
       role: dto.role,
       phone: dto.emailOrPhone,
-      email: dto.emailOrPhone.includes('@') ? dto.emailOrPhone : null,
+      email: inviteEmail,
       status: 'pending',
       expiresAt,
     });
+
+    // Phone-only invites have no delivery channel yet (no SMS invite path exists) — the invitee
+    // only finds out if the link is shared with them some other way.
+    if (inviteEmail) {
+      await this.emailService.sendTeamInviteEmail(
+        inviteEmail,
+        inviteEmail,
+        vet.name,
+        vet.clinicName,
+        dto.role,
+        token,
+        'vet',
+      );
+    }
 
     return { data: null, message: 'Invite sent' };
   }
@@ -1208,7 +1228,11 @@ export class VetPortalService {
     const vet = await this.vetModel.findById(vetId).exec();
     if (!vet) throw new NotFoundException('Vet not found');
 
-    if (dto.payout && user.staffRole && !['admin_vet', 'manager'].includes(user.staffRole)) {
+    if (
+      dto.payout &&
+      user.staffRole &&
+      !['admin_vet', 'manager'].includes(user.staffRole)
+    ) {
       throw new ForbiddenException({
         message: 'Only the clinic admin or manager can update payout details',
         code: 'FORBIDDEN',
@@ -1218,9 +1242,41 @@ export class VetPortalService {
     // Business identity (clinic name/phone/address) — admin_vet/manager owned, same gate as
     // payout above. Personal identity (name/photo/about/specialty) lives on /vet/profile/me
     // instead, which every staff member can edit for themselves regardless of staffRole.
-    if (dto.profile && user.staffRole && !['admin_vet', 'manager'].includes(user.staffRole)) {
+    if (
+      dto.profile &&
+      user.staffRole &&
+      !['admin_vet', 'manager'].includes(user.staffRole)
+    ) {
       throw new ForbiddenException({
-        message: 'Only the clinic admin or manager can update clinic profile details',
+        message:
+          'Only the clinic admin or manager can update clinic profile details',
+        code: 'FORBIDDEN',
+      });
+    }
+
+    // Consultation fees and availability are clinic-wide (they apply to the whole clinic's
+    // booking surface, not just the calling vet), so they're admin_vet/manager owned too —
+    // same gate as profile/payout above. A team_vet must not be able to change what the whole
+    // clinic charges or when it's open.
+    if (
+      dto.consultation &&
+      user.staffRole &&
+      !['admin_vet', 'manager'].includes(user.staffRole)
+    ) {
+      throw new ForbiddenException({
+        message:
+          'Only the clinic admin or manager can update consultation fees',
+        code: 'FORBIDDEN',
+      });
+    }
+    if (
+      dto.availability &&
+      user.staffRole &&
+      !['admin_vet', 'manager'].includes(user.staffRole)
+    ) {
+      throw new ForbiddenException({
+        message:
+          'Only the clinic admin or manager can update clinic availability',
         code: 'FORBIDDEN',
       });
     }
@@ -1231,6 +1287,10 @@ export class VetPortalService {
       vet.address = dto.profile.fullAddress;
       vet.city = dto.profile.city;
       vet.area = dto.profile.area;
+      vet.location = {
+        type: 'Point',
+        coordinates: [dto.profile.lng, dto.profile.lat],
+      };
     }
 
     if (dto.consultation) {
@@ -1308,6 +1368,10 @@ export class VetPortalService {
                 address: dto.profile.fullAddress,
                 city: dto.profile.city,
                 area: dto.profile.area,
+                location: {
+                  type: 'Point',
+                  coordinates: [dto.profile.lng, dto.profile.lat],
+                },
               },
             },
           )
@@ -1625,6 +1689,8 @@ export class VetPortalService {
       city: dto.city,
       area: dto.area,
       fullAddress: dto.fullAddress,
+      lat: dto.lat,
+      lng: dto.lng,
       specialisations: dto.specialisations,
       feeMin: parseInt(dto.feeMin, 10),
       feeMax: parseInt(dto.feeMax, 10),
@@ -1718,6 +1784,9 @@ export class VetPortalService {
       phone: dto.phone,
       address: inviter.address,
       area: invite.entityArea ?? '',
+      // Inherit the clinic's real coordinates rather than falling back to the schema default —
+      // an invited team member is joining an existing clinic, not setting up a new location.
+      location: inviter.location,
       fee: { min: parseInt(dto.consultationFee, 10) || 500, max: parseInt(dto.consultationFee, 10) || 1000 },
       specializations: dto.specialisations,
       languages: dto.languages,

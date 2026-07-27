@@ -32,6 +32,17 @@ export class VetApplication {
   @Prop({ required: true })
   fullAddress: string;
 
+  // From the frontend's pin-drop location picker (Leaflet + Nominatim reverse-geocode) — the
+  // free-text address above is just a human-readable label the applicant can freely edit; these
+  // are the actual coordinates used for real distance search once the application is approved
+  // into a Vet document. Nullable only so applications submitted before this field existed don't
+  // break — new submissions always send both.
+  @Prop({ type: Number, default: null })
+  lat: number | null;
+
+  @Prop({ type: Number, default: null })
+  lng: number | null;
+
   @Prop({ type: [String], default: [] })
   specialisations: string[];
 

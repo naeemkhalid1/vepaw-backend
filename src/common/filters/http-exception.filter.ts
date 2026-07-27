@@ -48,6 +48,9 @@ export class HttpExceptionFilter implements ExceptionFilter {
       message,
       code: body.code ?? status,
       ...(isValidationError && { errors: rawMessage }),
+      ...(typeof body.retryAfter === 'number' && {
+        retryAfter: body.retryAfter,
+      }),
       path: request.url,
       timestamp: new Date().toISOString(),
     });

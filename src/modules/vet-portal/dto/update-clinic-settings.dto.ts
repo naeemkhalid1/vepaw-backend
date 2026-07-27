@@ -1,4 +1,19 @@
-import { IsArray, IsBoolean, IsIn, IsNotEmpty, IsNumber, IsObject, IsOptional, IsString, Matches, MinLength, ValidateIf, ValidateNested } from 'class-validator';
+import {
+  IsArray,
+  IsBoolean,
+  IsIn,
+  IsLatitude,
+  IsLongitude,
+  IsNotEmpty,
+  IsNumber,
+  IsObject,
+  IsOptional,
+  IsString,
+  Matches,
+  MinLength,
+  ValidateIf,
+  ValidateNested,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -8,6 +23,10 @@ class ClinicProfileDto {
   @IsString() @IsNotEmpty() fullAddress: string;
   @IsString() @IsNotEmpty() city: string;
   @IsString() @IsNotEmpty() area: string;
+  // From the map pin-drop location picker (ClinicProfileCard) — real coordinates for distance
+  // search, independent of whatever text ends up in fullAddress/city/area.
+  @IsLatitude() lat: number;
+  @IsLongitude() lng: number;
 }
 
 class ConsultationSettingsDto {

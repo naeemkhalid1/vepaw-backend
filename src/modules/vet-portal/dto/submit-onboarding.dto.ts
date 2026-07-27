@@ -1,4 +1,16 @@
-import { IsArray, IsEmail, IsIn, IsNotEmpty, IsOptional, IsString, Matches, MinLength, ValidateIf } from 'class-validator';
+import {
+  IsArray,
+  IsEmail,
+  IsIn,
+  IsLatitude,
+  IsLongitude,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  Matches,
+  MinLength,
+  ValidateIf,
+} from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class SubmitOnboardingDto {
@@ -35,6 +47,20 @@ export class SubmitOnboardingDto {
   @IsString()
   @MinLength(5)
   fullAddress: string;
+
+  @ApiProperty({
+    description: 'From the map pin-drop location picker',
+    example: 31.5204,
+  })
+  @IsLatitude()
+  lat: number;
+
+  @ApiProperty({
+    description: 'From the map pin-drop location picker',
+    example: 74.3436,
+  })
+  @IsLongitude()
+  lng: number;
 
   @ApiProperty()
   @IsArray()

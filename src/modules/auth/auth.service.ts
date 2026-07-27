@@ -30,6 +30,7 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { AdminLoginDto } from './dto/admin-login.dto';
 import { VerifySetPasswordTokenDto } from './dto/verify-set-password-token.dto';
 import { SetPasswordDto } from './dto/set-password.dto';
+import { ConfirmPinResetDto } from './dto/confirm-pin-reset.dto';
 
 const OTP_TTL_SECONDS = 60;
 const OTP_RATE_WINDOW_SECONDS = 600;
@@ -67,10 +68,12 @@ export class AuthService {
     }
 
     if (attempts > MAX_OTP_ATTEMPTS) {
+      const retryAfter = await this.redisService.ttl(attemptsKey);
       throw new HttpException(
         {
           message: 'Too many requests. Please wait before requesting again.',
           code: 'OTP_RATE_LIMITED',
+          retryAfter,
         },
         HttpStatus.TOO_MANY_REQUESTS,
       );
@@ -119,6 +122,86 @@ export class AuthService {
       data: { ...tokens, isNewUser, user: toUserResponse(user) },
       message: 'Login successful',
     };
+  }
+
+  // Identity verification only for the device-only-PIN "Forgot PIN?" flow — the PIN itself lives
+  // in MMKV on-device and this backend has no PIN field to touch. `pin-reset:` keys are a
+  // separate Redis namespace from `otp:`/`otp:attempts:` so resetting a PIN never interferes with
+  // an in-progress login OTP for the same phone, and vice versa. Phone comes from the
+  // authenticated user's own profile, never the request body, so this can't be used to probe or
+  // reset PINs for other accounts.
+  async requestPinReset(
+    userId: string,
+  ): Promise<ServiceResponse<{ expiresIn: number }>> {
+    const user = await this.userModel.findById(userId).exec();
+    if (!user) {
+      throw new BadRequestException({
+        message: 'User not found',
+        code: 'USER_NOT_FOUND',
+      });
+    }
+
+    const attemptsKey = `pin-reset:attempts:${user.phone}`;
+    const attempts = await this.redisService.incr(attemptsKey);
+    if (attempts === 1) {
+      await this.redisService.expire(attemptsKey, OTP_RATE_WINDOW_SECONDS);
+    }
+    if (attempts > MAX_OTP_ATTEMPTS) {
+      const retryAfter = await this.redisService.ttl(attemptsKey);
+      throw new HttpException(
+        {
+          message: 'Too many requests. Please wait before requesting again.',
+          code: 'OTP_RATE_LIMITED',
+          retryAfter,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
+    const code = this.smsService.generateOtp();
+    await this.redisService.set(
+      `pin-reset:${user.phone}`,
+      code,
+      OTP_TTL_SECONDS,
+    );
+    await this.smsService.sendOtp(user.phone, code);
+
+    return {
+      data: { expiresIn: OTP_TTL_SECONDS },
+      message: 'Code sent successfully',
+    };
+  }
+
+  async confirmPinReset(
+    userId: string,
+    dto: ConfirmPinResetDto,
+  ): Promise<ServiceResponse<{ verified: boolean }>> {
+    const user = await this.userModel.findById(userId).exec();
+    if (!user) {
+      throw new BadRequestException({
+        message: 'User not found',
+        code: 'USER_NOT_FOUND',
+      });
+    }
+
+    const stored = await this.redisService.get(`pin-reset:${user.phone}`);
+    if (!stored) {
+      throw new BadRequestException({
+        message: 'Code has expired. Please request a new one.',
+        code: 'CODE_EXPIRED',
+      });
+    }
+    if (stored !== dto.code) {
+      throw new BadRequestException({
+        message: 'Incorrect code. Please try again.',
+        code: 'INVALID_CODE',
+      });
+    }
+
+    await this.redisService.del(`pin-reset:${user.phone}`);
+    await this.redisService.del(`pin-reset:attempts:${user.phone}`);
+
+    return { data: { verified: true }, message: 'Code verified' };
   }
 
   async refresh(dto: RefreshTokenDto): Promise<ServiceResponse<TokenPair>> {

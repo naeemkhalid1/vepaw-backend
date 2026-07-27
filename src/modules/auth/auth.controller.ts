@@ -1,10 +1,4 @@
-import {
-  Body,
-  Controller,
-  HttpCode,
-  HttpStatus,
-  Post,
-} from '@nestjs/common';
+import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { SendOtpDto } from './dto/send-otp.dto';
@@ -16,7 +10,9 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { AdminLoginDto } from './dto/admin-login.dto';
 import { VerifySetPasswordTokenDto } from './dto/verify-set-password-token.dto';
 import { SetPasswordDto } from './dto/set-password.dto';
+import { ConfirmPinResetDto } from './dto/confirm-pin-reset.dto';
 import { Public } from '../../common/decorators/public.decorator';
+import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { JwtPayload } from '../../shared/types';
 
@@ -36,7 +32,10 @@ export class AuthController {
   @Public()
   @Post('verify-otp')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Verify OTP — returns tokens + user. isNewUser=true means onboarding required' })
+  @ApiOperation({
+    summary:
+      'Verify OTP — returns tokens + user. isNewUser=true means onboarding required',
+  })
   verifyOtp(@Body() dto: VerifyOtpDto) {
     return this.authService.verifyOtp(dto);
   }
@@ -52,7 +51,9 @@ export class AuthController {
   @Post('logout')
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Logout — invalidates the refresh token server-side' })
+  @ApiOperation({
+    summary: 'Logout — invalidates the refresh token server-side',
+  })
   logout(@CurrentUser() user: JwtPayload, @Body() dto: LogoutDto) {
     return this.authService.logout(user.sub, dto);
   }
@@ -87,5 +88,32 @@ export class AuthController {
   @ApiOperation({ summary: 'Set password for approved vet/store account' })
   setPassword(@Body() dto: SetPasswordDto) {
     return this.authService.setPassword(dto);
+  }
+
+  @Post('pin/reset')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @Roles('user')
+  @ApiOperation({
+    summary:
+      "Forgot PIN — send a 6-digit code to the caller's own registered phone",
+  })
+  requestPinReset(@CurrentUser() user: JwtPayload) {
+    return this.authService.requestPinReset(user.sub);
+  }
+
+  @Post('pin/reset/confirm')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @Roles('user')
+  @ApiOperation({
+    summary:
+      'Forgot PIN — verify the code. Identity check only, does not touch any PIN (device-only storage)',
+  })
+  confirmPinReset(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: ConfirmPinResetDto,
+  ) {
+    return this.authService.confirmPinReset(user.sub, dto);
   }
 }

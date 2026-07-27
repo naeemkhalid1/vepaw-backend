@@ -5,16 +5,23 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  Patch,
   Post,
   Put,
+  Query,
   Res,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { ApiBearerAuth, ApiConsumes, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { StorePortalService } from './store-portal.service';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Public } from '../../common/decorators/public.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { imageUploadOptions } from '../../common/storage/image-upload.options';
+import { csvUploadOptions } from '../../common/storage/csv-upload.options';
 import type { JwtPayload } from '../../shared/types';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
@@ -30,6 +37,7 @@ import {
   UpdateTeamMemberStatusDto,
   UpdatePayoutAccountDto,
 } from './dto/update-status.dto';
+import { UpdateImportMappingDto } from './dto/update-import-mapping.dto';
 
 // ─── Orders Controller ──────────────────────────────────
 
@@ -42,8 +50,14 @@ export class StoreOrdersController {
 
   @Get()
   @ApiOperation({ summary: 'List store orders' })
-  getOrders(@CurrentUser() user: JwtPayload) {
-    return this.service.getOrders(user.sub);
+  @ApiQuery({ name: 'from', required: false, description: 'ISO date — filter orders created on/after this date' })
+  @ApiQuery({ name: 'to', required: false, description: 'ISO date — filter orders created on/before this date' })
+  getOrders(
+    @CurrentUser() user: JwtPayload,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.service.getOrders(user.sub, from, to);
   }
 
   @Get('stats')
@@ -128,6 +142,14 @@ export class StoreProductsController {
     return this.service.createProductDraft(user.sub, dto);
   }
 
+  @Post('upload-photo')
+  @UseInterceptors(FileInterceptor('photo', imageUploadOptions))
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({ summary: 'Upload a product photo — call before create/update, pass the returned name as productPhoto' })
+  uploadPhoto(@UploadedFile() photo: Express.Multer.File) {
+    return this.service.uploadProductPhoto(photo);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get product detail' })
   getProduct(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
@@ -159,10 +181,24 @@ export class StoreProductsController {
 export class StoreBulkImportController {
   constructor(private readonly service: StorePortalService) {}
 
+  @Post('upload')
+  @UseInterceptors(FileInterceptor('file', csvUploadOptions))
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({ summary: 'Upload a product CSV — replaces any previous pending import for this store' })
+  uploadFile(@CurrentUser() user: JwtPayload, @UploadedFile() file: Express.Multer.File) {
+    return this.service.uploadImportFile(user.sub, file);
+  }
+
   @Get('preview')
   @ApiOperation({ summary: 'Import preview' })
   getPreview(@CurrentUser() user: JwtPayload) {
     return this.service.getImportPreview(user.sub);
+  }
+
+  @Patch('mapping')
+  @ApiOperation({ summary: 'Update column mapping for the pending import' })
+  updateMapping(@CurrentUser() user: JwtPayload, @Body() dto: UpdateImportMappingDto) {
+    return this.service.updateImportMapping(user.sub, dto.columnMappings);
   }
 
   @Post('confirm')
@@ -328,6 +364,15 @@ export class StoreSettingsController {
 @Controller('store')
 export class StoreRegistrationController {
   constructor(private readonly service: StorePortalService) {}
+
+  @Public()
+  @Post('register/upload')
+  @UseInterceptors(FileInterceptor('file', imageUploadOptions))
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({ summary: 'Upload a registration document (business proof) — call before register, pass the returned name as businessProof' })
+  uploadRegistrationDocument(@UploadedFile() file: Express.Multer.File) {
+    return this.service.uploadRegistrationDocument(file);
+  }
 
   @Public()
   @Post('register')

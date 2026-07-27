@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
+import { ImportField } from '../../shared/utils/product-import.util';
 
 export type StoreDocument = HydratedDocument<Store> & {
   createdAt: Date;
@@ -115,6 +116,53 @@ export class Store {
     default: 'store',
   })
   role: string;
+
+  // One in-flight CSV product import per store — a new upload replaces whatever was pending.
+  // `s3Key` points at the raw uploaded file (kept as an audit/support trail, private storage);
+  // `rows`/`columnMappings` are the working copy the Upload → Map → Review flow reads/writes
+  // against directly, so re-mapping columns doesn't need to re-fetch or re-parse the file.
+  @Prop({
+    type: {
+      s3Key: { type: String },
+      fileName: { type: String },
+      fileSize: { type: Number },
+      headers: { type: [String], default: [] },
+      rows: {
+        type: [
+          {
+            rowNumber: { type: Number },
+            values: { type: [String], default: [] },
+          },
+        ],
+        default: [],
+      },
+      columnMappings: {
+        type: [
+          {
+            columnIndex: { type: Number },
+            csvColumn: { type: String },
+            mappedField: { type: String, default: null },
+          },
+        ],
+        default: [],
+      },
+      uploadedAt: { type: Date },
+    },
+    default: null,
+  })
+  pendingImport: {
+    s3Key: string;
+    fileName: string;
+    fileSize: number;
+    headers: string[];
+    rows: { rowNumber: number; values: string[] }[];
+    columnMappings: {
+      columnIndex: number;
+      csvColumn: string;
+      mappedField: ImportField | null;
+    }[];
+    uploadedAt: Date;
+  } | null;
 }
 
 export const StoreSchema = SchemaFactory.createForClass(Store);

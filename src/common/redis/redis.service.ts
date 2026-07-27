@@ -40,4 +40,14 @@ export class RedisService {
       entry.expiresAt = Date.now() + ttlSeconds * 1000;
     }
   }
+
+  // Seconds remaining until the key expires — 0 if the key is missing, already expired, or has
+  // no TTL set at all. Used to hand a real "try again in N seconds" value back to the client
+  // instead of just a rate-limited error with no indication of when to retry.
+  async ttl(key: string): Promise<number> {
+    const entry = this.store.get(key);
+    if (!entry || !entry.expiresAt) return 0;
+    const remainingMs = entry.expiresAt - Date.now();
+    return remainingMs > 0 ? Math.ceil(remainingMs / 1000) : 0;
+  }
 }

@@ -530,9 +530,12 @@ Open `checkoutUrl` in a webview. This creates a 15-minute soft-lock on the slot 
 There is no client-callable "initiate payment" endpoint anymore. Instead, the endpoint that creates the thing you're paying for (`POST /appointments/reservations`, `POST /consultations`, `POST /mobile/store/orders` with `paymentMethod: "safepay"`) directly returns a `checkoutUrl` in its response — open it in a webview, same pattern across all three flows.
 
 **Webhook (server-to-server, not called by the app):**
-- `POST /appointments/webhooks/safepay`
-- `POST /consultations/webhooks/safepay`
-- `POST /mobile/store/orders/webhooks/safepay`
+
+**Correction (2026-07-22):** Safepay only allows **one endpoint per event type** per merchant account (confirmed against their dashboard — registering `payment.succeeded` on a second endpoint fails with "already subscribed on another endpoint"). So despite three webhook routes existing in the codebase, Safepay is only ever configured to call **one** of them:
+- `POST /appointments/webhooks/safepay` — the one Safepay actually calls for every flow.
+- `POST /consultations/webhooks/safepay`, `POST /mobile/store/orders/webhooks/safepay` — still exist and still work if called directly (e.g. manual testing), but are not Safepay's registered target.
+
+The appointments endpoint dispatches internally: it reads `metadata.order_id` from the event (the domain record's own `_id`, set at checkout-session creation regardless of which flow created it), checks which collection owns that ID (`AppointmentReservation` → `ConsultationSession` → `Order`), and delegates to that flow's own event-handling logic. Adding a future payment type means adding a lookup branch here, not registering a new Safepay endpoint.
 
 Each verifies Safepay's `x-sfpy-signature` header (HMAC over the raw request body) before processing. On `payment.succeeded`, the pending reservation/session/order is confirmed (exact effect differs per flow — see §7, the Consultations section, and §9/Store). On `payment.failed`, it's cancelled. All three are idempotent — a duplicate webhook delivery is a safe no-op.
 
@@ -606,6 +609,8 @@ Query params: `page` (default 1), `limit` (default 20)
 **Rules:** Polled every 30 seconds by the app tracking screen — must be fast. `rider` field populated only when `status = "dispatched" | "delivered"`.
 
 Order `status` values: `"pending" | "confirmed" | "packed" | "dispatched" | "delivered" | "cancelled"`
+
+**New (2026-07-22) — paid-but-unconfirmed auto-cancel:** if a `safepay` order reaches `paymentStatus: "paid"` but the store never advances `status` past `"pending"` within **6 hours**, an hourly cron auto-cancels it (`status: "cancelled"`, `paymentStatus: "refunded"`) and issues a real Safepay refund. The owner gets an `order_cancelled` notification (see §15.1) when this happens — this is indistinguishable in the Order object itself from a manually-cancelled order, so rely on the notification/timing to tell them apart if the UI needs to.
 
 ---
 
@@ -744,6 +749,7 @@ Notification types and navigation targets:
 | `vaccination` | targetId = petId → PetProfile |
 | `order_delivery` | targetId = orderId → OrderTracking |
 | `order_delivered` | targetId = orderId → OrderTracking |
+| `order_cancelled` | targetId = orderId → OrderTracking (new 2026-07-22 — fired by the paid-but-unconfirmed auto-cancel, see §10.3) |
 | `message` | targetId = vetId → ConsultationChat |
 | `booking` | targetId = vetId → VetProfile |
 | `rating` | targetId = vetId → VetProfile |

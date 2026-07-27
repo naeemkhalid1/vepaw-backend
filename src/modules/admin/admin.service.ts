@@ -13,7 +13,7 @@ import { JwtService } from '@nestjs/jwt';
 import { Model, Types } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import { AuthService } from '../auth/auth.service';
-import { EmailService } from '../../common/email/email.service';
+import { BrevoEmailService } from '../../common/email/brevo-email.service';
 import { S3Service } from '../../common/storage/s3.service';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { Vet, VetDocument } from '../../database/schemas/vet.schema';
@@ -87,7 +87,7 @@ export class AdminService {
     private readonly config: ConfigService,
     private readonly jwtService: JwtService,
     @Inject(forwardRef(() => AuthService)) private readonly authService: AuthService,
-    private readonly emailService: EmailService,
+    private readonly emailService: BrevoEmailService,
     private readonly s3Service: S3Service,
   ) {}
 
@@ -265,6 +265,8 @@ export class AdminService {
         city: app.city,
         area: app.area,
         fullAddress: app.fullAddress,
+        lat: app.lat,
+        lng: app.lng,
         specialisations: app.specialisations,
         feeMin: app.feeMin,
         feeMax: app.feeMax,
@@ -651,6 +653,17 @@ export class AdminService {
           languages: app.languages, yearsExperience: app.yearsOfExperience,
           pvmcNumber: app.pvmcNumber, primaryQualification: app.primaryQualification,
           university: app.university, verified: true, applicationStatus: 'approved', subscriptionStatus: 'active',
+          // Applications submitted before the pin-drop picker shipped have no lat/lng — omit the
+          // key entirely so Mongoose falls back to the schema default rather than writing a null
+          // location, matching pre-existing behavior for those.
+          ...(app.lat != null && app.lng != null
+            ? {
+                location: {
+                  type: 'Point' as const,
+                  coordinates: [app.lng, app.lat],
+                },
+              }
+            : {}),
         });
         const clinic = await this.clinicModel.create({
           name: app.clinicName,

@@ -108,3 +108,28 @@ Store's `availableToWithdraw` becomes eligible **immediately on delivery** (`sta
 3. Wire into `AdminService.settlePayout()` (`src/modules/admin/admin.service.ts`) — this already handles both `entityType`s generically, so one integration point covers vets and stores. Call the disbursement API with the entity's `walletNumber` (resolved from `Clinic` or `Store` depending on `entityType`) + `Payout.amount` instead of (or before) the admin manually typing in a `transactionReference`; auto-fill it from the provider's response.
 4. Handle **async settlement** — these APIs are typically "submit now, confirmed later via webhook." `Payout.status` already has an unused `'processing'` value for exactly this transition; needs a webhook receiver following the same pattern as `appointments-webhook.controller.ts`/`consultations-webhook.controller.ts`/`store-webhook.controller.ts` to flip `processing` → `completed` (or a failed state) when the provider confirms.
 5. Failure/retry handling — a bounced disbursement (bad account number, insufficient float) must fall back into the pending queue with a visible reason, never silently disappear.
+
+---
+
+## 4. Appointment cancellation — no real Safepay refund (found 2026-07-22)
+
+**Context:** `AppointmentsService.cancelAppointment()` sets `paymentStatus: 'refunded'` as a status label only — `SafepayService` has no `refund` method call anywhere in the appointments flow, so no money actually moves.
+
+**Why this is now inconsistent, not just incomplete:** store orders got a real fix for the equivalent gap on 2026-07-22 — `StoreService.autoCancelUnconfirmedPaidOrders()` calls a genuine `SafepayService.refundPayment(trackerToken, amountPKR)` (wraps the SDK's `client.order.cancel.refund()`, confirmed live against Safepay's sandbox — note the API requires `amount`+`currency` explicitly, it rejects a refund request with neither). Appointments never got the equivalent, so today a cancelled, previously-paid appointment shows `paymentStatus: 'refunded'` to the owner without a single rupee actually moving — worse than before the store fix existed, since now there's a working template sitting right next to the still-fake one.
+
+**Fix, using the store fix as the template:** call `safepayService.refundPayment(appt.paymentReference, appt.fee)` from `cancelAppointment()` before setting `paymentStatus: 'refunded'`, with the same claim-before-refund-call-then-revert-on-failure pattern already proven in `StoreService.autoCancelUnconfirmedPaidOrders()`. Same question applies to consultations' cancellation path if one exists.
+
+---
+
+## 5. Clinic-identity cascade broke phone-based login for multi-staff clinics (found 2026-07-22, needs a decision)
+
+**Context:** as of 2026-07-21/22, a clinic's `admin_vet`/`manager` can update `clinicName`/`phone`/`address`/`city`/`area`, and the write cascades to every other staff `Vet` in the same clinic (see `ARCHETECTURE.md` §3). This correctly unifies the clinic's public business identity — but `AuthService.login()` looks up a vet via a bare `vetModel.findOne({ $or: [{email},{phone}] })`, which silently assumed `phone` was unique per person. Once 2+ staff share one phone number (by design now), `findOne` returns whichever record Mongo hands back first, and everyone else's phone-based login attempts fail with a generic "Invalid credentials" — even when they typed their own correct password — because it's really checking it against the wrong account.
+
+**Confirmed live:** in a real 3-person clinic (admin_vet + team_vet + manager, all sharing one cascaded phone number), only the admin_vet's phone-based login worked; the manager's failed until logging in with email instead.
+
+**Not yet decided — needs a product/eng call, not a quiet patch:**
+- **Option A — email-only login for team_vet/manager.** No schema change. Simplest, but limits login UX for anyone who doesn't have their email handy (mirrors how `AuthService.login()` already works today for anyone who happens to type a shared phone).
+- **Option B — separate "personal login phone" field**, distinct from the clinic's shared public `phone`. Real schema change (`Vet` needs a second phone-like field), migration to backfill it from the current `phone` value before the first cascade touches it, and a decision on whether it's ever shown publicly or purely internal.
+- **Option C — disambiguate at login time** (e.g. ask which clinic/person when a phone matches multiple accounts) — more UI work, and awkward for a single-field login form.
+
+No code changes made for this yet — flagging so it doesn't get silently forgotten the next time someone doing a demo can't figure out why a manager's login "isn't working."

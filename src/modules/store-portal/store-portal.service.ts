@@ -9,6 +9,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { Model, Types } from 'mongoose';
 import * as bcrypt from 'bcrypt';
 import { randomBytes } from 'crypto';
+import { parse as parseCsv } from 'csv-parse/sync';
 import { Order, OrderDocument } from '../../database/schemas/order.schema';
 import { Product, ProductDocument } from '../../database/schemas/product.schema';
 import { Store, StoreDocument } from '../../database/schemas/store.schema';
@@ -21,7 +22,17 @@ import {
   PayoutAccountAuditDocument,
 } from '../../database/schemas/payout-account-audit.schema';
 import { ServiceResponse } from '../../shared/types';
+import { S3Service } from '../../common/storage/s3.service';
+import { BrevoEmailService } from '../../common/email/brevo-email.service';
 import { payoutMethodLabel, payoutAccountValue, maskPayoutValue } from '../../shared/utils/payout-account.util';
+import {
+  detectColumnMappings,
+  validateRows,
+  formatFileSize,
+  ColumnMapping,
+  ImportField,
+  ImportRowRecord,
+} from '../../shared/utils/product-import.util';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { UpdateStoreSettingsDto } from './dto/update-store-settings.dto';
@@ -38,6 +49,11 @@ import {
 } from './dto/update-status.dto';
 
 const AVATAR_COLORS = ['#6366F1', '#F59E0B', '#10B981', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6', '#F97316'];
+
+// Keeps a single pending import's parsed rows comfortably inside Mongo's 16MB document limit —
+// a store catalog this large should be split into batches anyway.
+const MAX_IMPORT_ROWS = 1000;
+const IMPORT_PREVIEW_SAMPLE_SIZE = 20;
 
 function getInitials(name: string): string {
   return name.split(' ').map((w) => w[0]).join('').toUpperCase().slice(0, 2);
@@ -86,6 +102,8 @@ export class StorePortalService {
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     @InjectModel(PayoutAccountAudit.name)
     private readonly payoutAccountAuditModel: Model<PayoutAccountAuditDocument>,
+    private readonly s3Service: S3Service,
+    private readonly emailService: BrevoEmailService,
   ) {}
 
   // ─── Orders ──────────────────────────────────────────────
@@ -98,9 +116,27 @@ export class StorePortalService {
     $or: [{ paymentMethod: 'cod' }, { paymentStatus: 'paid' }],
   };
 
-  async getOrders(storeId: string): Promise<ServiceResponse<Record<string, unknown>[]>> {
+  async getOrders(storeId: string, from?: string, to?: string): Promise<ServiceResponse<Record<string, unknown>[]>> {
+    const createdAt: Record<string, Date> = {};
+    if (from) {
+      const start = new Date(from);
+      if (isNaN(start.getTime())) throw new BadRequestException('Invalid "from" date');
+      createdAt.$gte = start;
+    }
+    if (to) {
+      const end = new Date(to);
+      if (isNaN(end.getTime())) throw new BadRequestException('Invalid "to" date');
+      end.setHours(23, 59, 59, 999);
+      createdAt.$lte = end;
+    }
+
     const orders = await this.orderModel
-      .find({ store: new Types.ObjectId(storeId), status: { $ne: 'cancelled' }, ...this.payableFilter })
+      .find({
+        store: new Types.ObjectId(storeId),
+        status: { $ne: 'cancelled' },
+        ...this.payableFilter,
+        ...(Object.keys(createdAt).length ? { createdAt } : {}),
+      })
       .sort({ createdAt: -1 })
       .populate('user', 'name area')
       .lean()
@@ -113,6 +149,7 @@ export class StorePortalService {
         orderNumber: o.orderId,
         customerName: user?.name ?? 'Customer',
         customerArea: o.deliveryAddress?.area ?? user?.area ?? '',
+        createdAt: o.createdAt,
         timeAgo: timeAgo(o.createdAt),
         itemCount: o.items.length,
         itemLabel: o.items.length === 1 ? '1 item' : `${o.items.length} items`,
@@ -253,9 +290,13 @@ export class StorePortalService {
       category: p.category,
       categoryIcon: getCategoryIcon(p.category),
       iconBgColor: getCategoryBgColor(p.category),
+      photo: p.photo ?? null,
+      description: p.description,
       price: p.price,
       stock: p.stock ?? 0,
       sold: p.sold ?? 0,
+      sku: p.sku ?? null,
+      requiresPrescription: p.requiresPrescription ?? false,
       status: p.productStatus ?? (p.inStock ? 'active' : 'outOfStock'),
     }));
 
@@ -324,6 +365,14 @@ export class StorePortalService {
       },
       message: 'Product retrieved',
     };
+  }
+
+  // Returned `name` is what createProduct/updateProduct/createProductDraft already read as
+  // productPhoto.name and persist verbatim as Product.photo — matches the vet-onboarding upload
+  // contract (upload first, then reference the returned name in the create/update body).
+  async uploadProductPhoto(photo: Express.Multer.File): Promise<ServiceResponse<{ name: string; status: string }>> {
+    const url = await this.s3Service.uploadImage(photo, 'uploads');
+    return { data: { name: url, status: 'uploaded' }, message: 'Photo uploaded' };
   }
 
   async createProduct(storeId: string, dto: CreateProductDto): Promise<ServiceResponse<{ success: boolean; message: string }>> {
@@ -402,10 +451,127 @@ export class StorePortalService {
   }
 
   // ─── Bulk Import ────────────────────────────────────────
+  // Upload → Map → Review, backed by Store.pendingImport (one in-flight import per store) rather
+  // than Redis/a session store — the raw file lives in S3 as the durable/audit copy, and the
+  // parsed rows + column mapping live directly on the Store doc so Map/Review steps work purely
+  // against Mongo without re-fetching or re-parsing the file each time.
+
+  async uploadImportFile(storeId: string, file: Express.Multer.File): Promise<ServiceResponse<Record<string, unknown>>> {
+    const parsed = parseCsv(file.buffer, { skip_empty_lines: true, trim: true }) as string[][];
+    if (parsed.length === 0) throw new BadRequestException('CSV file is empty');
+
+    const [headerRow, ...dataRows] = parsed;
+    if (dataRows.length === 0) throw new BadRequestException('CSV file has no data rows');
+    if (dataRows.length > MAX_IMPORT_ROWS) {
+      throw new BadRequestException(`CSV has ${dataRows.length} rows — split it into batches of ${MAX_IMPORT_ROWS} or fewer`);
+    }
+
+    const s3Key = await this.s3Service.uploadPrivateImage(file, 'store-imports');
+    const columnMappings = detectColumnMappings(headerRow);
+    // rowNumber is 1-indexed against the file itself (header = row 1) so it matches what the
+    // store owner sees if they open the CSV in a spreadsheet — not a 0-indexed array position.
+    const rows: ImportRowRecord[] = dataRows.map((values, i) => ({ rowNumber: i + 2, values }));
+
+    const pendingImport = {
+      s3Key,
+      fileName: file.originalname,
+      fileSize: file.size,
+      headers: headerRow,
+      rows,
+      columnMappings,
+      uploadedAt: new Date(),
+    };
+    await this.storeModel.findByIdAndUpdate(storeId, { pendingImport }).exec();
+
+    return { data: this.buildImportPreviewResponse(pendingImport), message: 'File uploaded' };
+  }
 
   async getImportPreview(storeId: string): Promise<ServiceResponse<Record<string, unknown>>> {
+    const store = await this.storeModel.findById(storeId).select('pendingImport').lean().exec();
+    return { data: this.buildImportPreviewResponse(store?.pendingImport ?? null), message: 'Import preview retrieved' };
+  }
+
+  async updateImportMapping(
+    storeId: string,
+    columnMappings: { columnIndex: number; mappedField?: ImportField | null }[],
+  ): Promise<ServiceResponse<Record<string, unknown>>> {
+    const store = await this.storeModel.findById(storeId).select('pendingImport').exec();
+    if (!store?.pendingImport) throw new NotFoundException('No pending import — upload a file first');
+
+    const mappedFields = columnMappings.map((m) => m.mappedField).filter((f): f is ImportField => f !== null);
+    if (new Set(mappedFields).size !== mappedFields.length) {
+      throw new BadRequestException('Each column can only be mapped to one field at a time');
+    }
+
+    const byIndex = new Map(columnMappings.map((m) => [m.columnIndex, m.mappedField]));
+    store.pendingImport.columnMappings = store.pendingImport.columnMappings.map((existing) => ({
+      ...existing,
+      mappedField: byIndex.has(existing.columnIndex) ? (byIndex.get(existing.columnIndex) ?? null) : existing.mappedField,
+    }));
+    store.markModified('pendingImport');
+    await store.save();
+
+    return { data: this.buildImportPreviewResponse(store.pendingImport), message: 'Column mapping updated' };
+  }
+
+  async confirmImport(storeId: string): Promise<ServiceResponse<{ success: boolean; imported: number; skipped: number; errors: { row: number; reasons: string[] }[]; message: string }>> {
+    const store = await this.storeModel.findById(storeId).lean().exec();
+    if (!store?.pendingImport) {
+      return { data: { success: false, imported: 0, skipped: 0, errors: [], message: 'No file to import' }, message: 'Import confirmed' };
+    }
+
+    const validated = validateRows(store.pendingImport.rows, store.pendingImport.columnMappings as ColumnMapping[]);
+    const validRows = validated.filter((r) => r.errors.length === 0);
+    const invalidRows = validated.filter((r) => r.errors.length > 0);
+
+    if (validRows.length > 0) {
+      await this.productModel.insertMany(
+        validRows.map((r) => ({
+          store: new Types.ObjectId(storeId),
+          storeName: store.storeName,
+          name: r.mapped.productName!,
+          // CSV rows carry no photo column — imported products start with no photo, same as any
+          // product created without one; the store can add one afterwards via upload-photo.
+          photo: null,
+          description: r.mapped.description!,
+          category: (r.mapped.category ?? '').toLowerCase(),
+          price: Number(r.mapped.price),
+          stock: Number(r.mapped.stockQuantity),
+          inStock: Number(r.mapped.stockQuantity) > 0,
+          productStatus: 'active',
+          requiresPrescription: r.requiresPrescription ?? false,
+          batchNumber: r.mapped.batchNumber || null,
+          expiryDate: r.mapped.expiryDate || null,
+          sku: r.mapped.sku || null,
+          variants: [],
+        })),
+      );
+    }
+
+    await this.storeModel.findByIdAndUpdate(storeId, { pendingImport: null }).exec();
+
     return {
       data: {
+        success: true,
+        imported: validRows.length,
+        skipped: invalidRows.length,
+        errors: invalidRows.map((r) => ({ row: r.rowNumber, reasons: r.errors })),
+        message: `Imported ${validRows.length} product${validRows.length === 1 ? '' : 's'}${invalidRows.length ? `, skipped ${invalidRows.length}` : ''}`,
+      },
+      message: 'Import confirmed',
+    };
+  }
+
+  private buildImportPreviewResponse(
+    pendingImport: {
+      fileName: string;
+      fileSize: number;
+      rows: ImportRowRecord[];
+      columnMappings: ColumnMapping[];
+    } | null,
+  ): Record<string, unknown> {
+    if (!pendingImport) {
+      return {
         fileName: '',
         fileSize: '0 KB',
         totalRows: 0,
@@ -415,13 +581,34 @@ export class StorePortalService {
         previewRows: [],
         remainingRows: 0,
         columnMappings: [],
-      },
-      message: 'Import preview retrieved',
-    };
-  }
+      };
+    }
 
-  async confirmImport(storeId: string): Promise<ServiceResponse<{ success: boolean; imported: number; message: string }>> {
-    return { data: { success: true, imported: 0, message: 'No file to import' }, message: 'Import confirmed' };
+    const validated = validateRows(pendingImport.rows, pendingImport.columnMappings);
+    const readyCount = validated.filter((r) => r.errors.length === 0 && r.requiresPrescription === false).length;
+    const needRxCount = validated.filter((r) => r.errors.length === 0 && r.requiresPrescription === true).length;
+    const errorCount = validated.filter((r) => r.errors.length > 0).length;
+    const previewRows = validated.slice(0, IMPORT_PREVIEW_SAMPLE_SIZE).map((r) => ({
+      row: r.rowNumber,
+      productName: r.mapped.productName ?? '',
+      category: r.mapped.category ?? '',
+      price: r.mapped.price ?? '',
+      stockQuantity: r.mapped.stockQuantity ?? '',
+      requiresPrescription: r.requiresPrescription,
+      errors: r.errors,
+    }));
+
+    return {
+      fileName: pendingImport.fileName,
+      fileSize: formatFileSize(pendingImport.fileSize),
+      totalRows: validated.length,
+      readyCount,
+      needRxCount,
+      errorCount,
+      previewRows,
+      remainingRows: Math.max(0, validated.length - previewRows.length),
+      columnMappings: pendingImport.columnMappings.map((m) => ({ columnIndex: m.columnIndex, csvColumn: m.csvColumn, mappedField: m.mappedField })),
+    };
   }
 
   async getImportTemplate(): Promise<string> {
@@ -712,6 +899,13 @@ export class StorePortalService {
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 7);
 
+    // Invite.email was never being set here despite the schema/DTO supporting it (dto is named
+    // emailOrPhone) — meant this invite could never actually be emailed even before the send call
+    // below existed.
+    const inviteEmail = dto.emailOrPhone.includes('@')
+      ? dto.emailOrPhone
+      : null;
+
     await this.inviteModel.create({
       token,
       entityType: 'store',
@@ -721,9 +915,24 @@ export class StorePortalService {
       inviteeName: dto.emailOrPhone,
       role: 'fulfilmentStaff',
       phone: dto.emailOrPhone,
+      email: inviteEmail,
       status: 'pending',
       expiresAt,
     });
+
+    // Phone-only invites have no delivery channel yet (no SMS invite path exists) — the invitee
+    // only finds out if the link is shared with them some other way.
+    if (inviteEmail) {
+      await this.emailService.sendTeamInviteEmail(
+        inviteEmail,
+        inviteEmail,
+        store.ownerName,
+        store.storeName,
+        'fulfilmentStaff',
+        token,
+        'store',
+      );
+    }
 
     return { data: null, message: 'Invite sent' };
   }
@@ -809,6 +1018,14 @@ export class StorePortalService {
   }
 
   // ─── Registration ──────────────────────────────────────
+
+  // Public (pre-auth, same as vet onboarding's upload) — call before register, pass the
+  // returned name as businessProof. Public 'uploads' prefix: not government ID like a vet's
+  // CNIC, so no private-storage handling needed.
+  async uploadRegistrationDocument(file: Express.Multer.File): Promise<ServiceResponse<{ name: string; status: string }>> {
+    const url = await this.s3Service.uploadImage(file, 'uploads');
+    return { data: { name: url, status: 'uploaded' }, message: 'Document uploaded' };
+  }
 
   async register(dto: StoreRegisterDto): Promise<ServiceResponse<{ success: boolean; message: string }>> {
     const existing = await this.storeModel.findOne({ phone: dto.phone }).lean().exec();
