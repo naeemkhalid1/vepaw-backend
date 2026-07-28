@@ -31,8 +31,10 @@ export class Invite {
   @Prop({ required: true })
   role: string;
 
-  @Prop({ required: true })
-  phone: string;
+  // Nullable, mirroring `email` below — the invite is created from a single emailOrPhone input,
+  // so exactly one of these two is ever real; the other is null, not a copy of the other value.
+  @Prop({ type: String, default: null })
+  phone: string | null;
 
   @Prop({ type: String, default: null })
   email: string | null;

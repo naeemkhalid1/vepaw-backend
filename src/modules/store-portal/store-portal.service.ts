@@ -902,9 +902,9 @@ export class StorePortalService {
     // Invite.email was never being set here despite the schema/DTO supporting it (dto is named
     // emailOrPhone) — meant this invite could never actually be emailed even before the send call
     // below existed.
-    const inviteEmail = dto.emailOrPhone.includes('@')
-      ? dto.emailOrPhone
-      : null;
+    const isEmail = dto.emailOrPhone.includes('@');
+    const inviteEmail = isEmail ? dto.emailOrPhone : null;
+    const invitePhone = isEmail ? null : dto.emailOrPhone;
 
     await this.inviteModel.create({
       token,
@@ -914,7 +914,7 @@ export class StorePortalService {
       inviterName: store.ownerName,
       inviteeName: dto.emailOrPhone,
       role: 'fulfilmentStaff',
-      phone: dto.emailOrPhone,
+      phone: invitePhone,
       email: inviteEmail,
       status: 'pending',
       expiresAt,
@@ -1064,7 +1064,7 @@ export class StorePortalService {
         inviterName: invite.inviterName,
         inviteeName: invite.inviteeName,
         role: invite.role,
-        phone: invite.phone,
+        phone: invite.phone ?? '',
       },
       message: 'Invite details retrieved',
     };

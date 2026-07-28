@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -920,9 +921,9 @@ export class VetPortalService {
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 7);
 
-    const inviteEmail = dto.emailOrPhone.includes('@')
-      ? dto.emailOrPhone
-      : null;
+    const isEmail = dto.emailOrPhone.includes('@');
+    const inviteEmail = isEmail ? dto.emailOrPhone : null;
+    const invitePhone = isEmail ? null : dto.emailOrPhone;
 
     await this.inviteModel.create({
       token,
@@ -933,7 +934,7 @@ export class VetPortalService {
       inviterName: vet.name,
       inviteeName: dto.emailOrPhone,
       role: dto.role,
-      phone: dto.emailOrPhone,
+      phone: invitePhone,
       email: inviteEmail,
       status: 'pending',
       expiresAt,
@@ -1751,7 +1752,7 @@ export class VetPortalService {
         inviterName: invite.inviterName,
         inviteeName: invite.inviteeName,
         role: invite.role,
-        phone: invite.phone,
+        phone: invite.phone ?? '',
         email: invite.email ?? '',
       },
       message: 'Invite details retrieved',
@@ -1774,33 +1775,66 @@ export class VetPortalService {
       });
     }
 
+    // Vet.email is globally unique — without this check, an invitee who's already registered
+    // anywhere (own clinic, or staff elsewhere) hits Mongo's unique-index error on create()
+    // below, which isn't caught anywhere and surfaces as a raw 500. This isn't a fix for the
+    // underlying "one identity, one clinic" limitation (see PENDING_FEATURES.md §6) — it just
+    // turns the crash into an honest, actionable error.
+    const existingVet = await this.vetModel
+      .findOne({ email: dto.email })
+      .lean()
+      .exec();
+    if (existingVet) {
+      throw new ConflictException({
+        message:
+          'This email is already registered as a vet. Please use a different email or contact support.',
+        code: 'EMAIL_ALREADY_REGISTERED',
+      });
+    }
+
     const hashedPassword = await bcrypt.hash(dto.password, 10);
 
-    await this.vetModel.create({
-      name: dto.fullName,
-      clinicName: invite.entityName,
-      email: dto.email,
-      password: hashedPassword,
-      phone: dto.phone,
-      address: inviter.address,
-      area: invite.entityArea ?? '',
-      // Inherit the clinic's real coordinates rather than falling back to the schema default —
-      // an invited team member is joining an existing clinic, not setting up a new location.
-      location: inviter.location,
-      fee: { min: parseInt(dto.consultationFee, 10) || 500, max: parseInt(dto.consultationFee, 10) || 1000 },
-      specializations: dto.specialisations,
-      languages: dto.languages,
-      pvmcNumber: dto.pvmcNumber,
-      yearsExperience: parseInt(dto.yearsOfExperience, 10),
-      primaryQualification: dto.primaryQualification,
-      pvmcLicense: dto.pvmcLicense?.name ?? null,
-      cnicDocument: dto.cnic?.name ?? null,
-      verified: inviter.verified,
-      applicationStatus: 'approved',
-      subscriptionStatus: inviter.subscriptionStatus,
-      clinicId: inviter.clinicId,
-      staffRole: invite.role as 'team_vet' | 'manager',
-    });
+    try {
+      await this.vetModel.create({
+        name: dto.fullName,
+        clinicName: invite.entityName,
+        email: dto.email,
+        password: hashedPassword,
+        phone: dto.phone,
+        address: inviter.address,
+        area: invite.entityArea ?? '',
+        // Inherit the clinic's real coordinates rather than falling back to the schema default —
+        // an invited team member is joining an existing clinic, not setting up a new location.
+        location: inviter.location,
+        fee: {
+          min: parseInt(dto.consultationFee, 10) || 500,
+          max: parseInt(dto.consultationFee, 10) || 1000,
+        },
+        specializations: dto.specialisations,
+        languages: dto.languages,
+        pvmcNumber: dto.pvmcNumber,
+        yearsExperience: parseInt(dto.yearsOfExperience, 10),
+        primaryQualification: dto.primaryQualification,
+        pvmcLicense: dto.pvmcLicense?.name ?? null,
+        cnicDocument: dto.cnic?.name ?? null,
+        verified: inviter.verified,
+        applicationStatus: 'approved',
+        subscriptionStatus: inviter.subscriptionStatus,
+        clinicId: inviter.clinicId,
+        staffRole: invite.role as 'team_vet' | 'manager',
+      });
+    } catch (err: unknown) {
+      // Belt-and-suspenders for the race between the findOne check above and this insert (two
+      // accepts for the same email landing at the same instant) — same clean error either way,
+      // instead of leaking a raw Mongo E11000 as a 500 in that narrow window.
+      if ((err as { code?: number }).code === 11000) {
+        throw new ConflictException({
+          message: 'This email is already registered as a vet. Please use a different email or contact support.',
+          code: 'EMAIL_ALREADY_REGISTERED',
+        });
+      }
+      throw err;
+    }
 
     invite.status = 'accepted';
     await invite.save();
