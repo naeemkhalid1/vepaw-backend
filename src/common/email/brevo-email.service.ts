@@ -132,9 +132,9 @@ export class BrevoEmailService {
       'FRONTEND_URL',
       'http://localhost:3000',
     );
-    // NOTE: confirm this route with the frontend — mirrors the set-password link pattern above,
-    // but the vet/store portals may use a different path for their invite-accept screen.
-    const link = `${frontendUrl}/${entityType}/invite?token=${token}`;
+    // Confirmed against the live frontend (2026-07-28) — invite-accept screens live under
+    // /auth/, same as login (/auth/vet/login), not top-level as originally guessed.
+    const link = `${frontendUrl}/auth/${entityType}/invite?token=${token}`;
 
     const subject = `${inviterName} invited you to join ${entityName} on PawCare`;
     const html = `
