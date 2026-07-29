@@ -163,6 +163,11 @@ export class StoreService {
     const platformCommission = Math.round(serverTotal * STORE_COMMISSION_RATE);
     const storePayout = serverTotal - platformCommission;
 
+    // Reserved atomically per item (with rollback on partial failure) immediately before the
+    // order is created, not just gated by the stale inStock boolean checked above — closes the
+    // race where two concurrent orders could both pass the earlier check against the same unit.
+    await this.reserveStock(orderItems);
+
     const order = await this.orderModel.create({
       orderId: humanOrderId,
       user: userId,
@@ -249,6 +254,12 @@ export class StoreService {
     if (dto.rider) order.rider = dto.rider;
     if (dto.status === 'delivered') order.paymentStatus = 'paid';
     await order.save();
+
+    // The TERMINAL_STATUSES guard above already ensures this is a fresh transition into
+    // 'cancelled', not a repeat call — safe to restore once, unconditionally.
+    if (dto.status === 'cancelled') {
+      await this.restoreStock(order.items);
+    }
 
     return {
       data: toOrderResponse(order.toObject() as Parameters<typeof toOrderResponse>[0]),
@@ -415,6 +426,10 @@ export class StoreService {
         .exec();
       if (!updated) {
         this.logger.warn(`Safepay payment.failed: no matching pending order for ${orderId}`);
+      } else {
+        // Stock was reserved at placeOrder() time, before payment outcome was known — a failed
+        // payment means the reservation never converts to a real sale, so it must be released.
+        await this.restoreStock(updated.items);
       }
       return;
     }
@@ -436,20 +451,33 @@ export class StoreService {
   @Cron(CronExpression.EVERY_HOUR)
   async cancelAbandonedPendingPaymentOrders(): Promise<void> {
     const cutoff = new Date(Date.now() - ORDER_PENDING_PAYMENT_TIMEOUT_MINUTES * 60 * 1000);
-    const result = await this.orderModel
-      .updateMany(
-        {
-          paymentMethod: 'safepay',
-          paymentStatus: 'pending',
-          status: 'pending',
-          createdAt: { $lt: cutoff },
-        },
-        { $set: { status: 'cancelled' } },
-      )
+    // Looped rather than a bulk updateMany so each order's reserved stock can be restored
+    // individually — a bulk update has no per-document items to hand to restoreStock().
+    const stale = await this.orderModel
+      .find({
+        paymentMethod: 'safepay',
+        paymentStatus: 'pending',
+        status: 'pending',
+        createdAt: { $lt: cutoff },
+      })
       .exec();
 
-    if (result.modifiedCount > 0) {
-      this.logger.log(`Cancelled ${result.modifiedCount} abandoned pending-payment order(s)`);
+    let cancelled = 0;
+    for (const order of stale) {
+      const claimed = await this.orderModel
+        .findOneAndUpdate(
+          { _id: order._id, status: 'pending' },
+          { $set: { status: 'cancelled' } },
+          { new: true },
+        )
+        .exec();
+      if (!claimed) continue;
+      await this.restoreStock(claimed.items);
+      cancelled++;
+    }
+
+    if (cancelled > 0) {
+      this.logger.log(`Cancelled ${cancelled} abandoned pending-payment order(s)`);
     }
   }
 
@@ -500,6 +528,8 @@ export class StoreService {
         continue;
       }
 
+      await this.restoreStock(order.items);
+
       await this.notificationsService.createForRecipients(
         [order.user as Types.ObjectId],
         'user',
@@ -513,6 +543,50 @@ export class StoreService {
 
     if (processed > 0) {
       this.logger.log(`Auto-cancelled and refunded ${processed} unconfirmed paid order(s)`);
+    }
+  }
+
+  // Reserves stock for every item in one order, atomically per item so a concurrent order for
+  // the same product can't both succeed against the same units. Rolls back everything already
+  // reserved in this call if a later item fails, so a multi-item order never partially reserves.
+  private async reserveStock(
+    items: { product: Types.ObjectId; qty: number; name: string }[],
+  ): Promise<void> {
+    const reserved: { product: Types.ObjectId; qty: number }[] = [];
+    for (const item of items) {
+      const updated = await this.productModel
+        .findOneAndUpdate(
+          { _id: item.product, stock: { $gte: item.qty } },
+          { $inc: { stock: -item.qty } },
+          { new: true },
+        )
+        .exec();
+      if (!updated) {
+        await this.restoreStock(reserved);
+        throw new UnprocessableEntityException({
+          code: 'OUT_OF_STOCK',
+          message: `${item.name} is out of stock`,
+        });
+      }
+      reserved.push({ product: item.product, qty: item.qty });
+      if (updated.stock <= 0) {
+        await this.productModel
+          .updateOne({ _id: item.product }, { $set: { inStock: false } })
+          .exec();
+      }
+    }
+  }
+
+  // Returns reserved stock to a product — order cancellation from any path (owner/store action,
+  // Safepay payment.failed, or either auto-cancel cron) must call this so a cancelled order's
+  // units become orderable again instead of staying permanently reserved.
+  private async restoreStock(
+    items: { product: Types.ObjectId; qty: number }[],
+  ): Promise<void> {
+    for (const item of items) {
+      await this.productModel
+        .updateOne({ _id: item.product }, { $inc: { stock: item.qty }, $set: { inStock: true } })
+        .exec();
     }
   }
 }

@@ -224,7 +224,30 @@ export class StorePortalService {
       { status },
     ).exec();
     if (!order) throw new NotFoundException('Order not found');
+
+    // existing.status !== 'cancelled' guards against a repeat cancel call double-restoring —
+    // there's no TERMINAL_STATUSES-style guard on this endpoint blocking that the way the
+    // customer-facing StoreService.updateOrderStatus() has.
+    if (status === 'cancelled' && existing.status !== 'cancelled') {
+      await this.restoreStock(existing.items);
+    }
+
     return { data: null, message: `Order ${status}` };
+  }
+
+  // Mirrors StoreService.restoreStock() — returns reserved stock to a product on order
+  // cancellation initiated from the store-portal side.
+  private async restoreStock(
+    items: { product: Types.ObjectId; qty: number }[],
+  ): Promise<void> {
+    for (const item of items) {
+      await this.productModel
+        .updateOne(
+          { _id: item.product },
+          { $inc: { stock: item.qty }, $set: { inStock: true } },
+        )
+        .exec();
+    }
   }
 
   // ─── Subscriptions ──────────────────────────────────────
