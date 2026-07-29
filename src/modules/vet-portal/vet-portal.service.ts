@@ -894,13 +894,15 @@ export class VetPortalService {
     ]);
 
     const veterinarians = clinicVets.filter((v) => v.staffRole !== 'manager').length;
-    const managerCount = clinicVets.filter((v) => v.staffRole === 'manager').length;
+    // Admin card counts both administrative roles — admin_vet and manager — not just
+    // 'manager', which previously left the clinic owner (admin_vet) out of their own count.
+    const adminCount = clinicVets.filter((v) => v.staffRole === 'admin_vet' || v.staffRole === 'manager').length;
 
     return {
       data: {
         veterinarians,
         vetSubtitle: 'practicing',
-        managers: managerCount,
+        admins: adminCount,
         adminSubtitle: 'clinic staff',
         pendingInvites: invites,
         pendingSubtitle: 'awaiting response',
