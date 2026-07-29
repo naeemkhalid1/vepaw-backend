@@ -31,6 +31,7 @@ import {
 } from '../../database/schemas/consultation-session.schema';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { PaymentsModule } from '../../common/payments/payments.module';
 import { VetPortalService } from './vet-portal.service';
 import {
   VetScheduleController,
@@ -78,6 +79,7 @@ import {
     ]),
     RealtimeModule,
     NotificationsModule,
+    PaymentsModule,
   ],
   controllers: [
     VetScheduleController,

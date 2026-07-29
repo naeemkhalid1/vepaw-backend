@@ -111,13 +111,15 @@ Store's `availableToWithdraw` becomes eligible **immediately on delivery** (`sta
 
 ---
 
-## 4. Appointment cancellation — no real Safepay refund (found 2026-07-22)
+## 4. Appointment cancellation — no real Safepay refund (found 2026-07-22). **DONE (2026-07-29).**
 
-**Context:** `AppointmentsService.cancelAppointment()` sets `paymentStatus: 'refunded'` as a status label only — `SafepayService` has no `refund` method call anywhere in the appointments flow, so no money actually moves.
+**Context:** `AppointmentsService.cancelAppointment()` sets `paymentStatus: 'refunded'` as a status label only — `SafepayService` has no `refund` method call anywhere in the appointments flow, so no money actually moves. The exact same gap existed a second, independent time in `VetPortalService.updateAppointmentStatus()` (the vet-side cancel path).
 
-**Why this is now inconsistent, not just incomplete:** store orders got a real fix for the equivalent gap on 2026-07-22 — `StoreService.autoCancelUnconfirmedPaidOrders()` calls a genuine `SafepayService.refundPayment(trackerToken, amountPKR)` (wraps the SDK's `client.order.cancel.refund()`, confirmed live against Safepay's sandbox — note the API requires `amount`+`currency` explicitly, it rejects a refund request with neither). Appointments never got the equivalent, so today a cancelled, previously-paid appointment shows `paymentStatus: 'refunded'` to the owner without a single rupee actually moving — worse than before the store fix existed, since now there's a working template sitting right next to the still-fake one.
+**Why this was inconsistent, not just incomplete:** store orders got a real fix for the equivalent gap on 2026-07-22 — `StoreService.autoCancelUnconfirmedPaidOrders()` calls a genuine `SafepayService.refundPayment(trackerToken, amountPKR)` (wraps the SDK's `client.order.cancel.refund()`, confirmed live against Safepay's sandbox — note the API requires `amount`+`currency` explicitly, it rejects a refund request with neither). Appointments never got the equivalent, so a cancelled, previously-paid appointment showed `paymentStatus: 'refunded'` to the owner without a single rupee actually moving.
 
-**Fix, using the store fix as the template:** call `safepayService.refundPayment(appt.paymentReference, appt.fee)` from `cancelAppointment()` before setting `paymentStatus: 'refunded'`, with the same claim-before-refund-call-then-revert-on-failure pattern already proven in `StoreService.autoCancelUnconfirmedPaidOrders()`. Same question applies to consultations' cancellation path if one exists.
+**Fix shipped 2026-07-29, in both places:** both `cancelAppointment()` and `updateAppointmentStatus()` now call `safepayService.refundPayment(paymentReference, fee)` before committing the status change to `'cancelled'`, guarded to `paymentMethod === 'safepay' && paymentStatus === 'held'`. On refund failure, the appointment is left in its prior status (not committed to `'cancelled'`) so the caller can retry, rather than the old claim-then-revert pattern used by the store cron — appropriate here since this is a synchronous user-initiated action, not an unattended batch job. `VetPortalService` needed `SafepayService` newly injected (`PaymentsModule` added to `vet-portal.module.ts`).
+
+**Consultations' cancellation path checked — no equivalent gap.** `ConsultationsService.cancelConsultation()` only allows cancelling from `status: 'pending_payment'` (i.e. before any Safepay payment has landed) — once payment is submitted it explicitly routes through the dispute flow instead, so there was never a "cancelled after paying, no refund" case to fix here. (The dispute-reject path setting `refundRequired: true` with nothing ever consuming that flag is a separate, already-known gap, not this one.)
 
 ---
 

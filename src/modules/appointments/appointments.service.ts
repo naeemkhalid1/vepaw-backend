@@ -622,10 +622,32 @@ export class AppointmentsService {
       });
     }
 
-    appointment.status = 'cancelled';
-    if (appointment.paymentStatus === 'held') {
+    // Refund before committing the cancellation — if Safepay fails, the appointment stays in
+    // its current status so the owner can retry, instead of ending up 'cancelled' with a
+    // 'refunded' label while no money actually moved.
+    if (
+      appointment.paymentStatus === 'held' &&
+      appointment.paymentMethod === 'safepay' &&
+      appointment.paymentReference
+    ) {
+      try {
+        await this.safepayService.refundPayment(
+          appointment.paymentReference,
+          appointment.fee,
+        );
+      } catch (err) {
+        this.logger.error(
+          `Refund failed for appointment ${appointmentId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        throw new UnprocessableEntityException({
+          message: 'Unable to process the refund right now — please try again shortly',
+          code: 'REFUND_FAILED',
+        });
+      }
       appointment.paymentStatus = 'refunded';
     }
+
+    appointment.status = 'cancelled';
     await appointment.save();
 
     return {
