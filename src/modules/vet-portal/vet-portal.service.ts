@@ -54,6 +54,7 @@ import {
 } from '../../shared/types';
 import { S3Service } from '../../common/storage/s3.service';
 import { BrevoEmailService } from '../../common/email/brevo-email.service';
+import { SafepayService } from '../../common/payments/safepay.service';
 import { UpdateVetProfileDto } from './dto/update-vet-profile.dto';
 import { AddVisitNoteDto } from './dto/add-visit-note.dto';
 import { ReplyReviewDto } from './dto/reply-review.dto';
@@ -163,6 +164,7 @@ export class VetPortalService {
     private readonly chatGateway: ChatGateway,
     private readonly s3Service: S3Service,
     private readonly emailService: BrevoEmailService,
+    private readonly safepayService: SafepayService,
   ) {}
 
   // ─── Profile ────────────────────────────────────────────
@@ -1893,13 +1895,35 @@ export class VetPortalService {
       });
     }
 
-    appt.status = mappedStatus;
     // Cancellation always releases a held payment, regardless of which side (owner or vet)
     // initiated it — the money's fate follows the booking's fate, not the actor. Mirrors the
-    // owner-side cancelAppointment behavior in appointments.service.ts.
-    if (mappedStatus === 'cancelled' && appt.paymentStatus === 'held') {
+    // owner-side cancelAppointment behavior in appointments.service.ts, including refunding
+    // before committing the status change so a Safepay failure doesn't leave the appointment
+    // 'cancelled' with a 'refunded' label while no money actually moved.
+    if (
+      mappedStatus === 'cancelled' &&
+      appt.paymentStatus === 'held' &&
+      appt.paymentMethod === 'safepay' &&
+      appt.paymentReference
+    ) {
+      try {
+        await this.safepayService.refundPayment(
+          appt.paymentReference,
+          appt.fee,
+        );
+      } catch (err) {
+        this.logger.error(
+          `Refund failed for appointment ${appointmentId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        throw new UnprocessableEntityException({
+          message: 'Unable to process the refund right now — please try again shortly',
+          code: 'REFUND_FAILED',
+        });
+      }
       appt.paymentStatus = 'refunded';
     }
+
+    appt.status = mappedStatus;
     // Mirrors completeAppointment() in appointments.service.ts — this is the second vet-facing
     // "mark complete" path and must apply the same payout-hold window, or a safepay appointment
     // completed through this path would release instantly while the other path holds for
