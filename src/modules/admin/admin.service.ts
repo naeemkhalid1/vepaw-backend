@@ -567,26 +567,83 @@ export class AdminService {
     };
   }
 
-  async getAreaBreakdown(): Promise<ServiceResponse<Record<string, unknown>[]>> {
-    const users = await this.userModel.find().select('area').lean().exec();
+  // Keyed off Order.deliveryAddress rather than User.area — the profile-level area field
+  // defaults to '' and is never collected at OTP signup, so it was empty for most accounts and
+  // pushed ~80% of the breakdown into "Unknown". deliveryAddress is required on every order and
+  // reflects where business actually happened, not just whether a user filled in their profile.
+  async getAreaBreakdown(
+    dateFilter?: Record<string, unknown> | null,
+  ): Promise<ServiceResponse<Record<string, unknown>[]>> {
+    const orders = await this.orderModel
+      .find({
+        ...(dateFilter ? { createdAt: dateFilter } : {}),
+        status: { $ne: 'cancelled' },
+      })
+      .select('deliveryAddress')
+      .lean()
+      .exec();
     const areaCounts: Record<string, number> = {};
-    for (const u of users) { areaCounts[u.area || 'Unknown'] = (areaCounts[u.area || 'Unknown'] ?? 0) + 1; }
-    const total = users.length || 1;
+    for (const o of orders) {
+      const key = o.deliveryAddress?.area || o.deliveryAddress?.city || 'Unknown';
+      areaCounts[key] = (areaCounts[key] ?? 0) + 1;
+    }
+    const total = orders.length || 1;
     return {
       data: Object.entries(areaCounts).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([name, count]) => ({ name, percent: Math.round((count / total) * 100) })),
       message: 'Area breakdown retrieved',
     };
   }
 
-  async getCategoryBreakdown(): Promise<ServiceResponse<Record<string, unknown>[]>> {
-    const apptCount = await this.appointmentModel.countDocuments();
-    const orderItemCount = await this.orderModel.aggregate([{ $unwind: '$items' }, { $group: { _id: null, count: { $sum: '$items.qty' } } }]).exec();
-    const prodCount = orderItemCount[0]?.count ?? 0;
-    const total = prodCount + apptCount || 1;
+  // Was missing ConsultationSession entirely — a telehealth-heavy period showed as 100%
+  // "Products" with bookings undercounted, since consultations weren't in the denominator at
+  // all. Also now excludes cancelled/expired records from every bucket, consistent with the
+  // GMV/take-rate fix in getReportStatsWithPeriod below.
+  async getCategoryBreakdown(
+    dateFilter?: Record<string, unknown> | null,
+  ): Promise<ServiceResponse<Record<string, unknown>[]>> {
+    const baseFilter = dateFilter ? { createdAt: dateFilter } : {};
+    const [apptCount, consultCount, orderItemAgg] = await Promise.all([
+      this.appointmentModel.countDocuments({
+        ...baseFilter,
+        status: { $ne: 'cancelled' },
+      }),
+      this.consultationModel.countDocuments({
+        ...baseFilter,
+        status: { $nin: ['cancelled', 'expired'] },
+      }),
+      this.orderModel
+        .aggregate([
+          { $match: { ...baseFilter, status: { $ne: 'cancelled' } } },
+          { $unwind: '$items' },
+          { $group: { _id: null, count: { $sum: '$items.qty' } } },
+        ])
+        .exec(),
+    ]);
+    const prodCount = orderItemAgg[0]?.count ?? 0;
+    const total = prodCount + apptCount + consultCount || 1;
     const colors = ['#6366F1', '#F59E0B', '#10B981'];
     const data: Record<string, unknown>[] = [];
-    if (prodCount > 0) data.push({ name: 'Products', percent: Math.round((prodCount / total) * 100), color: colors[0] });
-    if (apptCount > 0) data.push({ name: 'Bookings', percent: Math.round((apptCount / total) * 100), color: colors[1] });
+    if (prodCount > 0) {
+      data.push({
+        name: 'Products',
+        percent: Math.round((prodCount / total) * 100),
+        color: colors[0],
+      });
+    }
+    if (apptCount > 0) {
+      data.push({
+        name: 'Bookings',
+        percent: Math.round((apptCount / total) * 100),
+        color: colors[1],
+      });
+    }
+    if (consultCount > 0) {
+      data.push({
+        name: 'Consultations',
+        percent: Math.round((consultCount / total) * 100),
+        color: colors[2],
+      });
+    }
     return { data, message: 'Category breakdown retrieved' };
   }
 
@@ -870,19 +927,26 @@ export class AdminService {
 
   async getReportStatsWithPeriod(period?: string): Promise<ServiceResponse<Record<string, unknown>>> {
     const dateFilter = this.getPeriodFilter(period ?? 'ytd');
+    const baseFilter = dateFilter ? { createdAt: dateFilter } : {};
+    // Excluding cancelled/expired records isn't just cosmetic — a cancelled order's totalAmount
+    // was previously counted as real GMV forever, which is how a single cancelled test/junk
+    // order can single-handedly blow out avgOrder (its totalAmount / a small order count).
     const [orders, appts, consults] = await Promise.all([
-      this.orderModel.find(dateFilter ? { createdAt: dateFilter } : {}).lean().exec(),
-      this.appointmentModel.find(dateFilter ? { createdAt: dateFilter } : {}).lean().exec(),
-      this.consultationModel.find(dateFilter ? { createdAt: dateFilter } : {}).lean().exec(),
+      this.orderModel.find({ ...baseFilter, status: { $ne: 'cancelled' } }).lean().exec(),
+      this.appointmentModel.find({ ...baseFilter, status: { $ne: 'cancelled' } }).lean().exec(),
+      this.consultationModel.find({ ...baseFilter, status: { $nin: ['cancelled', 'expired'] } }).lean().exec(),
     ]);
+    // ?? 0 on every summed field: any record missing a numeric field (e.g. a pre-migration
+    // document written before platformCommission existed on its schema) previously turned the
+    // whole reduce() into NaN, which is why takeRate rendered as the literal string "NaN%".
     const gmv =
-      orders.reduce((s, o) => s + o.totalAmount, 0) +
-      appts.reduce((s, a) => s + a.fee, 0) +
-      consults.reduce((s, c) => s + c.amount, 0);
+      orders.reduce((s, o) => s + (o.totalAmount ?? 0), 0) +
+      appts.reduce((s, a) => s + (a.fee ?? 0), 0) +
+      consults.reduce((s, c) => s + (c.amount ?? 0), 0);
     const commission =
-      orders.reduce((s, o) => s + o.platformCommission, 0) +
-      appts.reduce((s, a) => s + a.platformCommission, 0) +
-      consults.reduce((s, c) => s + c.platformCommission, 0);
+      orders.reduce((s, o) => s + (o.platformCommission ?? 0), 0) +
+      appts.reduce((s, a) => s + (a.platformCommission ?? 0), 0) +
+      consults.reduce((s, c) => s + (c.platformCommission ?? 0), 0);
     const takeRate = gmv > 0 ? ((commission / gmv) * 100).toFixed(1) : '0';
     const count = orders.length + appts.length + consults.length;
     const avgOrder = count > 0 ? Math.round(gmv / count) : 0;
@@ -891,6 +955,9 @@ export class AdminService {
         gmvYtd: `PKR ${gmv.toLocaleString()}`, gmvChange: 0, gmvPeriod: period ?? 'ytd',
         takeRate: `${takeRate}%`, takeRateSubtitle: 'blended commission',
         avgOrder: `PKR ${avgOrder.toLocaleString()}`, avgOrderChange: '0%',
+        // Not computed — no prior-period comparison or cohort-retention logic exists anywhere
+        // in this codebase yet. Left as an explicit '0%' placeholder rather than a fabricated
+        // number; a real fix needs a decision on what "30-day retention" should mean here first.
         retention: '0%', retentionChange: '0%', retentionSubtitle: '30-day retention',
       },
       message: 'Report stats retrieved',
@@ -898,11 +965,11 @@ export class AdminService {
   }
 
   async getAreaBreakdownWithPeriod(period?: string): Promise<ServiceResponse<Record<string, unknown>[]>> {
-    return this.getAreaBreakdown();
+    return this.getAreaBreakdown(this.getPeriodFilter(period ?? 'ytd'));
   }
 
   async getCategoryBreakdownWithPeriod(period?: string): Promise<ServiceResponse<Record<string, unknown>[]>> {
-    return this.getCategoryBreakdown();
+    return this.getCategoryBreakdown(this.getPeriodFilter(period ?? 'ytd'));
   }
 
   private getPeriodFilter(period: string): Record<string, unknown> | null {
