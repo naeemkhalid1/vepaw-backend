@@ -897,12 +897,18 @@ export class AdminService {
 
     // 'release' never needed a Safepay call — the held payment already belongs to the vet in
     // this outcome, it's just no longer blocked as disputed. Safe to resolve directly.
+    //
+    // Both outcomes return status to 'completed' — disputeAppointment() only ever moves an
+    // appointment INTO 'disputed' from 'completed' in the first place (the visit itself already
+    // happened either way), so resolution reverses that transition regardless of which way the
+    // payment goes. paymentStatus (released vs refunded) carries the financial outcome.
     if (outcome === 'release') {
       const updated = await this.appointmentModel
         .findOneAndUpdate(
           { _id: new Types.ObjectId(appointmentId), status: 'disputed' },
           {
             $set: {
+              status: 'completed',
               paymentStatus: 'released',
               adminResolvedBy: new Types.ObjectId(adminId),
               adminResolvedAt: now,
@@ -965,6 +971,7 @@ export class AdminService {
       });
     }
 
+    appointment.status = 'completed';
     appointment.paymentStatus = 'refunded';
     appointment.adminResolvedBy = new Types.ObjectId(adminId);
     appointment.adminResolvedAt = now;
