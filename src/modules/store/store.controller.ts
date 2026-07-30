@@ -63,9 +63,13 @@ export class StoreController {
   }
 
   @Patch('orders/:id/status')
-  @ApiOperation({ summary: 'Update order status (store/admin)' })
-  updateOrderStatus(@Param('id') id: string, @Body() dto: UpdateOrderStatusDto) {
-    return this.storeService.updateOrderStatus(id, dto);
+  @ApiOperation({ summary: 'Cancel my order' })
+  cancelOrder(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: UpdateOrderStatusDto,
+  ) {
+    return this.storeService.cancelOrder(user.sub, id, dto);
   }
 
   @Post('subscriptions')

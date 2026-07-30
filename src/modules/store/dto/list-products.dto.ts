@@ -41,10 +41,13 @@ export class ListProductsDto {
   @IsBoolean()
   isVetRecommended?: boolean;
 
-  @ApiPropertyOptional({ enum: ['newest', 'price_asc', 'price_desc', 'popular'], default: 'newest' })
+  @ApiPropertyOptional({
+    enum: ['newest', 'price_asc', 'price_desc', 'popular', 'relevance'],
+    description: 'Defaults to "relevance" when q is set, otherwise "newest".',
+  })
   @IsOptional()
-  @IsIn(['newest', 'price_asc', 'price_desc', 'popular'])
-  sort?: 'newest' | 'price_asc' | 'price_desc' | 'popular' = 'newest';
+  @IsIn(['newest', 'price_asc', 'price_desc', 'popular', 'relevance'])
+  sort?: 'newest' | 'price_asc' | 'price_desc' | 'popular' | 'relevance';
 
   @ApiPropertyOptional({ default: 1 })
   @IsOptional()

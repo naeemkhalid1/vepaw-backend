@@ -189,3 +189,18 @@ Every payment in this codebase today goes through `SafepayService.createCheckout
 8. **Decide the fate of `src/modules/subscriptions/`** — delete the dead empty shell, or actually move the logic there instead of leaving it split across `StoreService`.
 
 No code changes made for this yet — purely a planning/scoping pass, blocked on the Safepay Vault question above before implementation should start.
+
+---
+
+## 8. Store order delivery — platform stops at "dispatched," last-mile is the store's own responsibility (decided 2026-07-30)
+
+**Context:** While auditing the store-order status-update endpoints (see the ownership/cancel-only fix shipped the same day, `StoreService.cancelOrder()`), it came up that the only place `rider` (name/phone) was ever collected was the unrestricted customer-facing endpoint that just got locked down to cancel-only — meaning nothing in the system can currently capture rider info on dispatch at all, and `StorePortalService.updateOrderStatus()` (the correct, store-scoped place fulfillment transitions belong) has no rider field in its DTO either.
+
+**Decision:** the platform does **not** manage last-mile delivery in any form — no rider assignment, no rider fee, no delivery tracking, no platform-side rider marketplace. A store arranges delivery entirely on their own (their own staff, a courier they hire) outside the app. The platform's job ends at the transaction: order placed, payment handled, commission taken, order handed off to the store to fulfill however they see fit.
+
+**What this means concretely:**
+- `Order.rider` (name/phone) stays a purely optional, informational courtesy field if a store wants the customer to know who's coming — never required to progress an order through `confirmed → packed → dispatched → delivered`. (The old rider-required-on-dispatch check that lived in the now-removed customer-facing DTO should not be reintroduced on the store-portal side either.)
+- `delivered` is the store's own word — there's no rider app, no customer-side "confirm receipt" step, no tracking. A store marks an order delivered once they know it happened. A customer-confirmation step (mirroring the appointment dispute-window pattern) is possible future polish, not a blocker for anything today.
+- No rider-fee logic needed anywhere — `storePayout` (order total minus platform commission) already has to cover whatever a store spends on their own fulfillment, same as any retailer pricing in their own delivery cost. A separate customer-visible "delivery fee" line item is a future addable feature if ever wanted, not a current gap.
+
+**Not a bug, not blocked on anything** — this closes the rider-field question raised during the ownership fix; no further action needed unless the product direction changes.

@@ -84,14 +84,27 @@ export class StoreService {
       price_desc: { price: -1 },
       popular:    { sold: -1 },
     };
-    const sort = sortMap[dto.sort ?? 'newest'];
+    // 'relevance' is the implicit default while searching (q set, no explicit sort chosen) —
+    // previously a search ignored match quality entirely and just returned newest-first, so
+    // typing a query never surfaced the best match. An explicit sort still wins over relevance,
+    // same as it wins over the newest default, since that's a deliberate user choice.
+    const sort = dto.sort ?? (dto.q ? 'relevance' : 'newest');
 
     const page = dto.page ?? 1;
     const limit = dto.limit ?? 20;
     const skip = (page - 1) * limit;
 
+    let query = this.productModel.find(filter);
+    if (sort === 'relevance' && dto.q) {
+      query = query
+        .select({ score: { $meta: 'textScore' } })
+        .sort({ score: { $meta: 'textScore' } });
+    } else {
+      query = query.sort(sortMap[sort] ?? sortMap.newest);
+    }
+
     const [products, total] = await Promise.all([
-      this.productModel.find(filter).sort(sort).skip(skip).limit(limit).lean(),
+      query.skip(skip).limit(limit).lean(),
       this.productModel.countDocuments(filter),
     ]);
 
@@ -232,38 +245,55 @@ export class StoreService {
     };
   }
 
-  async updateOrderStatus(orderId: string, dto: UpdateOrderStatusDto): Promise<ServiceResponse<OrderResponse>> {
-    const order = await this.orderModel.findById(orderId);
+  // Owner-scoped and cancel-only, deliberately — this used to be an unrestricted "set any
+  // status" endpoint reachable by any authenticated principal on any order (not just its
+  // owner), including fulfillment transitions like 'delivered' that should only ever be a
+  // store action. Fulfillment now lives exclusively in StorePortalService.updateOrderStatus(),
+  // which is already scoped to `store: storeId`.
+  async cancelOrder(
+    userId: string,
+    orderId: string,
+    dto: UpdateOrderStatusDto,
+  ): Promise<ServiceResponse<OrderResponse>> {
+    const order = await this.orderModel.findOne({ _id: orderId, user: userId });
     if (!order) throw new NotFoundException({ code: 'ORDER_NOT_FOUND', message: 'Order not found' });
 
     if (TERMINAL_STATUSES.has(order.status)) {
       throw new UnprocessableEntityException({ code: 'ORDER_TERMINAL', message: 'Order is already in a terminal state' });
     }
 
-    // Same gate established marketplaces apply before a seller can act on an order — a safepay
-    // order that hasn't actually been paid for yet can't be advanced through fulfillment.
-    if (order.paymentMethod === 'safepay' && order.paymentStatus !== 'paid') {
-      throw new BadRequestException({ code: 'PAYMENT_NOT_CONFIRMED', message: 'Cannot update order status until payment is confirmed' });
-    }
-
-    if (dto.status === 'dispatched' && !dto.rider) {
-      throw new BadRequestException({ code: 'RIDER_REQUIRED', message: 'Rider details are required when dispatching an order' });
+    // Refund before committing the cancellation — same pattern as appointment cancellation —
+    // if Safepay fails, the order stays in its current status so the owner can retry, instead
+    // of ending up 'cancelled' with 'paid' still on it while no money actually moved back.
+    if (order.paymentMethod === 'safepay' && order.paymentStatus === 'paid') {
+      if (!order.paymentReference) {
+        this.logger.error(`Cancel: paid safepay order ${orderId} has no paymentReference, cannot refund`);
+        throw new UnprocessableEntityException({
+          code: 'REFUND_FAILED',
+          message: 'Unable to process the refund right now — please try again shortly',
+        });
+      }
+      try {
+        await this.safepayService.refundPayment(order.paymentReference, order.totalAmount);
+      } catch (err) {
+        this.logger.error(
+          `Refund failed for order ${orderId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        throw new UnprocessableEntityException({
+          code: 'REFUND_FAILED',
+          message: 'Unable to process the refund right now — please try again shortly',
+        });
+      }
+      order.paymentStatus = 'refunded';
     }
 
     order.status = dto.status;
-    if (dto.rider) order.rider = dto.rider;
-    if (dto.status === 'delivered') order.paymentStatus = 'paid';
     await order.save();
-
-    // The TERMINAL_STATUSES guard above already ensures this is a fresh transition into
-    // 'cancelled', not a repeat call — safe to restore once, unconditionally.
-    if (dto.status === 'cancelled') {
-      await this.restoreStock(order.items);
-    }
+    await this.restoreStock(order.items);
 
     return {
       data: toOrderResponse(order.toObject() as Parameters<typeof toOrderResponse>[0]),
-      message: 'Order status updated',
+      message: 'Order cancelled',
     };
   }
 
@@ -586,6 +616,22 @@ export class StoreService {
     for (const item of items) {
       await this.productModel
         .updateOne({ _id: item.product }, { $inc: { stock: item.qty }, $set: { inStock: true } })
+        .exec();
+    }
+  }
+
+  // Product.sold was previously never written anywhere — always stuck at its schema default of
+  // 0, which made the 'popular' sort inert and store-portal's "Total Sold" stat permanently
+  // wrong. Incremented on delivery specifically (not order placement, unlike stock) since
+  // 'sold' should mean a completed sale — delivery is also the point this system already treats
+  // as final (paymentStatus flips to 'paid' here too), and cancellation only ever happens
+  // pre-delivery in this status machine, so there's no reversal case to handle.
+  private async incrementSold(
+    items: { product: Types.ObjectId; qty: number }[],
+  ): Promise<void> {
+    for (const item of items) {
+      await this.productModel
+        .updateOne({ _id: item.product }, { $inc: { sold: item.qty } })
         .exec();
     }
   }

@@ -1,4 +1,12 @@
-import { IsNumber, IsOptional, IsPositive, IsString, Max, Min } from 'class-validator';
+import {
+  IsIn,
+  IsNumber,
+  IsOptional,
+  IsPositive,
+  IsString,
+  Max,
+  Min,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -36,6 +44,15 @@ export class ListVetsDto {
   @Type(() => Number)
   @IsNumber()
   lng?: number;
+
+  @ApiPropertyOptional({
+    enum: ['nearest', 'rating', 'featured'],
+    description:
+      'Sort order. Defaults to "nearest" when lat/lng is provided, otherwise "featured".',
+  })
+  @IsOptional()
+  @IsIn(['nearest', 'rating', 'featured'])
+  sort?: 'nearest' | 'rating' | 'featured';
 
   @ApiPropertyOptional({ default: 1 })
   @IsOptional()
