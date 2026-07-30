@@ -1,8 +1,6 @@
 import {
   ConflictException,
   ForbiddenException,
-  HttpException,
-  HttpStatus,
   Injectable,
   Logger,
   NotFoundException,
@@ -186,16 +184,6 @@ export class AppointmentsService {
       });
     }
 
-    if (dto.fee < vet.fee.min || dto.fee > vet.fee.max) {
-      throw new HttpException(
-        {
-          message: `Fee must be between ${vet.fee.min} and ${vet.fee.max} PKR`,
-          code: 'INVALID_FEE',
-        },
-        HttpStatus.UNPROCESSABLE_ENTITY,
-      );
-    }
-
     const [slotTaken, slotReserved] = await Promise.all([
       this.appointmentModel.exists({
         vet: new Types.ObjectId(dto.vetId),
@@ -218,7 +206,10 @@ export class AppointmentsService {
       });
     }
 
-    const fee = dto.fee;
+    // Always the vet's own minimum fee — never trusted from the client. dto.fee still exists on
+    // the request DTO purely so existing app requests that send it don't 400 against the global
+    // whitelist pipe; its value is ignored entirely.
+    const fee = vet.fee.min;
     const platformCommission = Math.round(fee * PLATFORM_COMMISSION_RATE);
     const vetPayout = fee - platformCommission;
 
@@ -295,16 +286,6 @@ export class AppointmentsService {
       });
     }
 
-    if (dto.fee < vet.fee.min || dto.fee > vet.fee.max) {
-      throw new HttpException(
-        {
-          message: `Fee must be between ${vet.fee.min} and ${vet.fee.max} PKR`,
-          code: 'INVALID_FEE',
-        },
-        HttpStatus.UNPROCESSABLE_ENTITY,
-      );
-    }
-
     const slotTaken = await this.appointmentModel.exists({
       vet: new Types.ObjectId(dto.vetId),
       date: dto.date,
@@ -319,7 +300,11 @@ export class AppointmentsService {
       });
     }
 
-    const fee = dto.fee;
+    // Always the vet's own minimum fee — never trusted from the client, same as
+    // createAppointment() above. dto.fee still exists on the request DTO purely so existing
+    // app requests that send it don't 400 against the global whitelist pipe; its value is
+    // ignored entirely.
+    const fee = vet.fee.min;
     const platformCommission = Math.round(fee * PLATFORM_COMMISSION_RATE);
     const vetPayout = fee - platformCommission;
     const expiresAt = new Date(
