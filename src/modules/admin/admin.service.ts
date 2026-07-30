@@ -96,16 +96,23 @@ export class AdminService {
 
   async getOverviewStats(): Promise<ServiceResponse<Record<string, unknown>>> {
     const startOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
-    const [users, vets, stores, monthOrders, monthAppts, pendingVets, pendingStores] = await Promise.all([
+    const [users, vets, stores, monthOrders, monthAppts, monthConsults, pendingVets, pendingStores] = await Promise.all([
       this.userModel.countDocuments(),
       this.vetModel.countDocuments({ verified: true }),
       this.storeModel.countDocuments({ status: 'approved' }),
-      this.orderModel.find({ createdAt: { $gte: startOfMonth } }).lean().exec(),
-      this.appointmentModel.find({ createdAt: { $gte: startOfMonth } }).lean().exec(),
+      this.orderModel.find({ createdAt: { $gte: startOfMonth }, status: { $ne: 'cancelled' } }).lean().exec(),
+      this.appointmentModel.find({ createdAt: { $gte: startOfMonth }, status: { $ne: 'cancelled' } }).lean().exec(),
+      this.consultationModel.find({ createdAt: { $gte: startOfMonth }, status: { $ne: 'cancelled' } }).lean().exec(),
       this.vetApplicationModel.countDocuments({ status: 'pending' }),
       this.storeModel.countDocuments({ status: 'pending' }),
     ]);
-    const gmv = monthOrders.reduce((s, o) => s + o.totalAmount, 0) + monthAppts.reduce((s, a) => s + a.fee, 0);
+    // Previously only Order + Appointment — consultation revenue was never counted here at
+    // all, undercounting relative to every other admin money view. ?? 0 guards against a
+    // record with a missing numeric field turning the whole sum into NaN.
+    const gmv =
+      monthOrders.reduce((s, o) => s + (o.totalAmount ?? 0), 0) +
+      monthAppts.reduce((s, a) => s + (a.fee ?? 0), 0) +
+      monthConsults.reduce((s, c) => s + (c.amount ?? 0), 0);
     return {
       data: {
         gmvThisMonth: `PKR ${gmv.toLocaleString()}`, gmvChange: 0, gmvComparison: 'vs last month',
@@ -120,13 +127,17 @@ export class AdminService {
   async getGmvChart(): Promise<ServiceResponse<Record<string, unknown>[]>> {
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     const year = new Date().getFullYear();
-    const [orders, appts] = await Promise.all([
-      this.orderModel.find({ createdAt: { $gte: new Date(year, 0, 1) } }).lean().exec(),
-      this.appointmentModel.find({ createdAt: { $gte: new Date(year, 0, 1) } }).lean().exec(),
+    // Previously only Order + Appointment — consultation revenue was never counted in this
+    // chart at all. Excludes 'cancelled' the same way every other GMV calculation does.
+    const [orders, appts, consults] = await Promise.all([
+      this.orderModel.find({ createdAt: { $gte: new Date(year, 0, 1) }, status: { $ne: 'cancelled' } }).lean().exec(),
+      this.appointmentModel.find({ createdAt: { $gte: new Date(year, 0, 1) }, status: { $ne: 'cancelled' } }).lean().exec(),
+      this.consultationModel.find({ createdAt: { $gte: new Date(year, 0, 1) }, status: { $ne: 'cancelled' } }).lean().exec(),
     ]);
     const monthlyMap: Record<number, number> = {};
-    for (const o of orders) { const m = o.createdAt.getMonth(); monthlyMap[m] = (monthlyMap[m] ?? 0) + o.totalAmount; }
-    for (const a of appts) { const m = a.createdAt.getMonth(); monthlyMap[m] = (monthlyMap[m] ?? 0) + a.fee; }
+    for (const o of orders) { const m = o.createdAt.getMonth(); monthlyMap[m] = (monthlyMap[m] ?? 0) + (o.totalAmount ?? 0); }
+    for (const a of appts) { const m = a.createdAt.getMonth(); monthlyMap[m] = (monthlyMap[m] ?? 0) + (a.fee ?? 0); }
+    for (const c of consults) { const m = c.createdAt.getMonth(); monthlyMap[m] = (monthlyMap[m] ?? 0) + (c.amount ?? 0); }
     return { data: months.map((month, i) => ({ month, amount: monthlyMap[i] ?? 0 })), message: 'GMV chart retrieved' };
   }
 
@@ -434,22 +445,29 @@ export class AdminService {
 
   async getCommissionStats(): Promise<ServiceResponse<Record<string, unknown>>> {
     const startOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+    // Excludes 'cancelled' the same way every other GMV/commission calculation in this file
+    // does — was previously unfiltered, so a cancelled order/appointment's commission counted
+    // here forever. Consultations only exclude 'cancelled', not 'expired' (real, already-paid
+    // revenue — see getReportStatsWithPeriod for the full reasoning).
     const [monthOrders, monthAppts, monthConsults, pendingPayouts] = await Promise.all([
-      this.orderModel.find({ createdAt: { $gte: startOfMonth } }).lean().exec(),
-      this.appointmentModel.find({ createdAt: { $gte: startOfMonth } }).lean().exec(),
-      this.consultationModel.find({ createdAt: { $gte: startOfMonth } }).lean().exec(),
+      this.orderModel.find({ createdAt: { $gte: startOfMonth }, status: { $ne: 'cancelled' } }).lean().exec(),
+      this.appointmentModel.find({ createdAt: { $gte: startOfMonth }, status: { $ne: 'cancelled' } }).lean().exec(),
+      this.consultationModel.find({ createdAt: { $gte: startOfMonth }, status: { $ne: 'cancelled' } }).lean().exec(),
       this.payoutModel.find({ status: 'pending' }).lean().exec(),
     ]);
+    // ?? 0 on every summed field: a record missing a numeric field (e.g. a pre-migration
+    // document) would otherwise turn the whole sum into NaN, same class of bug already fixed
+    // in getReportStatsWithPeriod.
     const totalCommission =
-      monthOrders.reduce((s, o) => s + o.platformCommission, 0) +
-      monthAppts.reduce((s, a) => s + a.platformCommission, 0) +
-      monthConsults.reduce((s, c) => s + c.platformCommission, 0);
+      monthOrders.reduce((s, o) => s + (o.platformCommission ?? 0), 0) +
+      monthAppts.reduce((s, a) => s + (a.platformCommission ?? 0), 0) +
+      monthConsults.reduce((s, c) => s + (c.platformCommission ?? 0), 0);
     const totalGmv =
-      monthOrders.reduce((s, o) => s + o.totalAmount, 0) +
-      monthAppts.reduce((s, a) => s + a.fee, 0) +
-      monthConsults.reduce((s, c) => s + c.amount, 0);
+      monthOrders.reduce((s, o) => s + (o.totalAmount ?? 0), 0) +
+      monthAppts.reduce((s, a) => s + (a.fee ?? 0), 0) +
+      monthConsults.reduce((s, c) => s + (c.amount ?? 0), 0);
     const takeRate = totalGmv > 0 ? ((totalCommission / totalGmv) * 100).toFixed(1) : '0';
-    const pendingTotal = pendingPayouts.reduce((s, p) => s + p.amount, 0);
+    const pendingTotal = pendingPayouts.reduce((s, p) => s + (p.amount ?? 0), 0);
     return {
       data: {
         commissionThisMonth: `PKR ${totalCommission.toLocaleString()}`, commissionChange: 0, commissionSubtitle: 'this month',
@@ -620,9 +638,14 @@ export class AdminService {
         ...baseFilter,
         status: { $ne: 'cancelled' },
       }),
+      // 'expired' is real, already-paid revenue — a session only ever reaches 'expired' from
+      // 'active', which itself is only reachable after a real payment.succeeded. Only
+      // 'cancelled' represents no net revenue (either never charged, or charged-then-refunded
+      // via a rejected dispute) — correcting an earlier version of this fix that wrongly
+      // excluded 'expired' too.
       this.consultationModel.countDocuments({
         ...baseFilter,
-        status: { $nin: ['cancelled', 'expired'] },
+        status: { $ne: 'cancelled' },
       }),
       this.orderModel
         .aggregate([
@@ -770,7 +793,12 @@ export class AdminService {
     const order = await this.orderModel.findByIdAndUpdate(transactionId, { status }).exec();
     if (!order) {
       const appt = await this.appointmentModel.findByIdAndUpdate(transactionId, { status: status === 'delivered' ? 'completed' : status }).exec();
-      if (!appt) throw new NotFoundException('Transaction not found');
+      if (!appt) {
+        // Was previously missing entirely — getTransactions() lists consultations in the same
+        // table as orders/appointments, but any status-update action on one silently 404'd.
+        const consult = await this.consultationModel.findByIdAndUpdate(transactionId, { status }).exec();
+        if (!consult) throw new NotFoundException('Transaction not found');
+      }
     }
     return { data: null, message: `Transaction ${status}` };
   }
@@ -787,6 +815,17 @@ export class AdminService {
       appt.paymentStatus = 'released';
       await appt.save();
       return { data: null, message: 'Escrow released' };
+    }
+    // Consultations have no manual-release concept to fix here — payout eligibility is fully
+    // automatic once status reaches 'closed'/'expired' (see batchPayoutForVet()), there's no
+    // held/released distinction to force. A clear reason instead of a generic 404 if an admin
+    // clicks this on a consultation row.
+    const consult = await this.consultationModel.findById(transactionId).lean().exec();
+    if (consult) {
+      throw new BadRequestException({
+        message: 'Consultations do not support manual escrow release — payout becomes eligible automatically once the session closes',
+        code: 'NOT_APPLICABLE',
+      });
     }
     throw new NotFoundException('Transaction not found or not eligible for release');
   }
@@ -861,11 +900,17 @@ export class AdminService {
       refundRequired = true;
     }
 
+    // 'cancelled', not 'expired' — ConsultationSession has no separate paymentStatus field, so
+    // this single status value doubles as the payout-eligibility gate in
+    // VetPortalService.batchPayoutForVet() / autoBatchWeeklyPayouts() ({$in:['closed','expired']}).
+    // A rejected-and-refunded session landing on 'expired' would still be swept into the vet's
+    // next payout batch — refunding the customer AND paying the vet for the same transaction.
+    // 'cancelled' is already excluded from every payout query and every GMV calculation.
     const updated = await this.consultationModel.findOneAndUpdate(
       { _id: new Types.ObjectId(sessionId), status: 'disputed' },
       {
         $set: {
-          status: 'expired' as const,
+          status: 'cancelled' as const,
           refundRequired,
           adminResolvedBy: new Types.ObjectId(adminId),
           adminResolvedAt: now,
@@ -883,7 +928,7 @@ export class AdminService {
       });
     }
 
-    await this.postConsultationStatusMessage(updated, 'expired', 'Payment dispute rejected — consultation ended');
+    await this.postConsultationStatusMessage(updated, 'cancelled', 'Payment dispute rejected — consultation ended');
 
     return { data: null, message: 'Disputed consultation rejected' };
   }
@@ -1042,13 +1087,17 @@ export class AdminService {
   async getReportStatsWithPeriod(period?: string): Promise<ServiceResponse<Record<string, unknown>>> {
     const dateFilter = this.getPeriodFilter(period ?? 'ytd');
     const baseFilter = dateFilter ? { createdAt: dateFilter } : {};
-    // Excluding cancelled/expired records isn't just cosmetic — a cancelled order's totalAmount
-    // was previously counted as real GMV forever, which is how a single cancelled test/junk
-    // order can single-handedly blow out avgOrder (its totalAmount / a small order count).
+    // Excluding cancelled records isn't just cosmetic — a cancelled order's totalAmount was
+    // previously counted as real GMV forever, which is how a single cancelled test/junk order
+    // can single-handedly blow out avgOrder (its totalAmount / a small order count).
+    // Consultations: only 'cancelled' means no net revenue (never charged, or charged-then-
+    // refunded via a rejected dispute) — 'expired' is real, already-paid revenue (only
+    // reachable from 'active', itself only reachable after payment.succeeded), so it must NOT
+    // be excluded the way it previously was here.
     const [orders, appts, consults] = await Promise.all([
       this.orderModel.find({ ...baseFilter, status: { $ne: 'cancelled' } }).lean().exec(),
       this.appointmentModel.find({ ...baseFilter, status: { $ne: 'cancelled' } }).lean().exec(),
-      this.consultationModel.find({ ...baseFilter, status: { $nin: ['cancelled', 'expired'] } }).lean().exec(),
+      this.consultationModel.find({ ...baseFilter, status: { $ne: 'cancelled' } }).lean().exec(),
     ]);
     // ?? 0 on every summed field: any record missing a numeric field (e.g. a pre-migration
     // document written before platformCommission existed on its schema) previously turned the
