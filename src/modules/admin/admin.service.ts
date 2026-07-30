@@ -5,6 +5,7 @@ import {
   Logger,
   NotFoundException,
   UnauthorizedException,
+  UnprocessableEntityException,
   forwardRef,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
@@ -894,21 +895,46 @@ export class AdminService {
   ): Promise<ServiceResponse<null>> {
     const now = new Date();
 
-    const updated = await this.appointmentModel
-      .findOneAndUpdate(
-        { _id: new Types.ObjectId(appointmentId), status: 'disputed' },
-        {
-          $set: {
-            paymentStatus: outcome === 'release' ? 'released' : 'refunded',
-            adminResolvedBy: new Types.ObjectId(adminId),
-            adminResolvedAt: now,
+    // 'release' never needed a Safepay call — the held payment already belongs to the vet in
+    // this outcome, it's just no longer blocked as disputed. Safe to resolve directly.
+    if (outcome === 'release') {
+      const updated = await this.appointmentModel
+        .findOneAndUpdate(
+          { _id: new Types.ObjectId(appointmentId), status: 'disputed' },
+          {
+            $set: {
+              paymentStatus: 'released',
+              adminResolvedBy: new Types.ObjectId(adminId),
+              adminResolvedAt: now,
+            },
           },
-        },
-        { new: true },
-      )
-      .exec();
+          { new: true },
+        )
+        .exec();
 
-    if (!updated) {
+      if (!updated) {
+        const exists = await this.appointmentModel.findById(appointmentId).lean().exec();
+        if (!exists) {
+          throw new NotFoundException({ message: 'Appointment not found', code: 'APPOINTMENT_NOT_FOUND' });
+        }
+        throw new BadRequestException({
+          message: 'This appointment is not currently disputed — it may have already been resolved',
+          code: 'INVALID_STATUS',
+        });
+      }
+
+      return { data: null, message: 'Disputed appointment payout released' };
+    }
+
+    // outcome === 'refund': previously just set paymentStatus: 'refunded' as a label with no
+    // Safepay call — the exact bug class already fixed elsewhere this session for
+    // appointment/order cancellation and the consultation dispute-reject path, missed here
+    // until now. Refund before committing the resolution — if Safepay fails, the appointment
+    // stays 'disputed' so admin can retry, instead of claiming refunded while no money moved.
+    const appointment = await this.appointmentModel
+      .findOne({ _id: new Types.ObjectId(appointmentId), status: 'disputed' })
+      .exec();
+    if (!appointment) {
       const exists = await this.appointmentModel.findById(appointmentId).lean().exec();
       if (!exists) {
         throw new NotFoundException({ message: 'Appointment not found', code: 'APPOINTMENT_NOT_FOUND' });
@@ -919,10 +945,32 @@ export class AdminService {
       });
     }
 
-    return {
-      data: null,
-      message: `Disputed appointment ${outcome === 'release' ? 'payout released' : 'refunded'}`,
-    };
+    if (!appointment.paymentReference) {
+      this.logger.error(`Disputed appointment ${appointmentId} refund requested but has no paymentReference — cannot refund automatically`);
+      throw new UnprocessableEntityException({
+        message: 'Unable to process the refund right now — please try again shortly',
+        code: 'REFUND_FAILED',
+      });
+    }
+
+    try {
+      await this.safepayService.refundPayment(appointment.paymentReference, appointment.fee);
+    } catch (err) {
+      this.logger.error(
+        `Refund failed for disputed appointment ${appointmentId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw new UnprocessableEntityException({
+        message: 'Unable to process the refund right now — please try again shortly',
+        code: 'REFUND_FAILED',
+      });
+    }
+
+    appointment.paymentStatus = 'refunded';
+    appointment.adminResolvedBy = new Types.ObjectId(adminId);
+    appointment.adminResolvedAt = now;
+    await appointment.save();
+
+    return { data: null, message: 'Disputed appointment refunded' };
   }
 
   private async postConsultationStatusMessage(

@@ -204,3 +204,35 @@ No code changes made for this yet — purely a planning/scoping pass, blocked on
 - No rider-fee logic needed anywhere — `storePayout` (order total minus platform commission) already has to cover whatever a store spends on their own fulfillment, same as any retailer pricing in their own delivery cost. A separate customer-visible "delivery fee" line item is a future addable feature if ever wanted, not a current gap.
 
 **Not a bug, not blocked on anything** — this closes the rider-field question raised during the ownership fix; no further action needed unless the product direction changes.
+
+---
+
+## 9. Appointment dispute resolution — admin has no evidence to actually adjudicate with (found 2026-07-30)
+
+**Context:** Found while live-testing the appointment dispute-resolve flow end to end (a real disputed appointment was created via `disputeAppointment()`, and the new admin "Actions → Release to vet / Refund owner" UI was exercised). Confirmed directly by tracing the code, not theoretical:
+
+- **The pet owner's `disputeReason` is captured but never surfaced anywhere.** `AdminService.getTransactions()` — the exact endpoint powering the admin "Recent transactions" table — doesn't include it in the response at all, and there's no dedicated disputed-appointment detail view either.
+- **The vet has no way to respond or submit their side at all.** No rebuttal field on the schema, no endpoint, nothing. The admin only ever hears from the person who filed the complaint.
+- **No conversation/evidence trail exists for appointments to review.** `Appointment` has no associated chat thread at all — unlike `ConsultationSession`, which does have a `thread` field (though the admin UI hasn't been confirmed to actually surface *that* one either).
+
+**Net effect:** clicking "Release to vet" vs. "Refund owner" today is a coin flip for the admin — they can see *that* a dispute exists and for how much, but not *why*, and never hear the vet's side before deciding who was right.
+
+**Also found in the same investigation (a separate, more urgent correctness bug, not part of this feature):** `AdminService.resolveDisputedAppointment()` doesn't call `SafepayService.refundPayment()` at all on the `'refund'` outcome — it just sets `paymentStatus: 'refunded'` as a label, the exact same bug class already fixed this session for appointment/order cancellation and the consultation dispute-reject path. This one path was missed by the earlier sweep and still needs the same fix (refund-before-commit, fail-safe on Safepay error) applied to it. Recommend fixing this regardless of when/whether the evidence-adjudication feature below gets built — it's a plain correctness bug, clicking "Refund owner" today does not move any money.
+
+### How established systems handle this (Airbnb Resolution Center, eBay/PayPal buyer-seller disputes, Uber trip disputes, DoorDash/Instacart order issues) — the common pattern across all of them
+1. **Both sides submit a structured case, not just the complainant** — the accused party gets a defined response window (eBay/PayPal call it "seller response," Airbnb calls it "host response").
+2. **All platform communication history is visible to the reviewer automatically** — never re-typed or summarized by either party, pulled in as-is. This is why these platforms route all buyer-seller/rider-driver communication through their own in-app messaging rather than off-platform phone/email.
+3. **Objective system data is surfaced automatically** — timestamps, location, delivery confirmation, photos — whatever the platform already knows, not just prose claims.
+4. **A defined response deadline** exists before a case can be resolved without the accused party's input — a fairness mechanism, not bureaucracy; resolving before the other side had a chance to speak is how you get a vet who feels railroaded and escalates further or leaves the platform.
+5. **The reviewer sees one consolidated case view** — transaction details, both statements, evidence, message history in one screen, not scattered across separate tables.
+6. **The decision is recorded with a rationale, and both parties are notified of the outcome** — not just a silent status flip.
+
+### What "real" looks like for this system specifically, not a shortcut
+1. **Vet rebuttal mechanism** — new endpoint for the vet to submit their own statement on a disputed appointment (could reuse the existing S3 upload pattern if evidence photos are wanted too).
+2. **Surface both statements to admin** — a real disputed-appointment detail view: `disputeReason` (owner's side, captured but currently invisible) + the new vet-response field + appointment/visit context.
+3. **Give appointments a chat thread too**, matching consultations — real conversation history to review, not two isolated after-the-fact statements.
+4. **A response deadline** (e.g. 48–72h) before admin can resolve without the vet's input.
+5. **A rationale field on resolution** — admin writes why they decided release vs. refund, stored and visible to both parties.
+6. **Notify both parties of the outcome** — `NotificationsService` is already wired everywhere else in this codebase; this flow should use it too.
+
+**Not decided, not started** — this is a real feature (evidence collection, response window, case-file view, audit trail), meaningfully bigger than a bug fix, and deliberately scoped separately from the `resolveDisputedAppointment()` refund-correctness bug above, which should be fixed regardless of when/whether this fuller feature gets built.
