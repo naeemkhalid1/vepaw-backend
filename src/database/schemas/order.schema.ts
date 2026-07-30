@@ -84,6 +84,17 @@ export class Order {
   @Prop({ type: String, default: null })
   paymentReference: string | null;
 
+  // Card-network chargeback status from Safepay's payment.disputed/dispute.won/dispute.lost
+  // webhooks — deliberately a separate field from `status`, which already has its own
+  // unrelated meaning (fulfillment state). A chargeback is the customer's bank contesting the
+  // charge directly with the card network, not the same thing as this app's own dispute flow.
+  @Prop({
+    type: String,
+    enum: ['disputed', 'won', 'lost', null],
+    default: null,
+  })
+  chargebackStatus: 'disputed' | 'won' | 'lost' | null;
+
   // Set when the Safepay webhook marks this order paid — anchors the auto-cancel-and-refund
   // cron's confirmation-timeout window, rather than relying on the generic updatedAt (which any
   // future order-mutating code could bump for unrelated reasons).

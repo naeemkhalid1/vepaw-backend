@@ -66,6 +66,16 @@ export class Appointment {
   @Prop({ type: String, default: null })
   paymentReference: string | null;
 
+  // Card-network chargeback status from Safepay's payment.disputed/dispute.won/dispute.lost
+  // webhooks — deliberately separate from `status`, whose own 'disputed' value means the pet
+  // owner reported a problem through this app, not a bank-level chargeback.
+  @Prop({
+    type: String,
+    enum: ['disputed', 'won', 'lost', null],
+    default: null,
+  })
+  chargebackStatus: 'disputed' | 'won' | 'lost' | null;
+
   @Prop({ type: String, default: null })
   notes: string | null;
 
