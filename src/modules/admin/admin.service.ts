@@ -15,6 +15,7 @@ import * as bcrypt from 'bcrypt';
 import { AuthService } from '../auth/auth.service';
 import { BrevoEmailService } from '../../common/email/brevo-email.service';
 import { S3Service } from '../../common/storage/s3.service';
+import { SafepayService } from '../../common/payments/safepay.service';
 import { User, UserDocument } from '../../database/schemas/user.schema';
 import { Vet, VetDocument } from '../../database/schemas/vet.schema';
 import { Clinic, ClinicDocument } from '../../database/schemas/clinic.schema';
@@ -89,6 +90,7 @@ export class AdminService {
     @Inject(forwardRef(() => AuthService)) private readonly authService: AuthService,
     private readonly emailService: BrevoEmailService,
     private readonly s3Service: S3Service,
+    private readonly safepayService: SafepayService,
   ) {}
 
   async getOverviewStats(): Promise<ServiceResponse<Record<string, unknown>>> {
@@ -128,17 +130,27 @@ export class AdminService {
   }
 
   async getAttentionItems(): Promise<ServiceResponse<Record<string, unknown>[]>> {
-    const [pendingVets, pendingStores, overdueAppointments, disputedOrders] = await Promise.all([
+    // 'won' chargebacks need no follow-up (resolved in the platform's favor) — 'disputed'
+    // (awaiting response) and 'lost' (money already forcibly reversed by the card network)
+    // both do, across all three domains a chargeback can land on.
+    const chargebackFilter = { chargebackStatus: { $in: ['disputed', 'lost'] as const } };
+    const [pendingVets, pendingStores, overdueAppointments, disputedOrders, chargebacks] = await Promise.all([
       this.vetApplicationModel.countDocuments({ status: 'pending' }),
       this.storeModel.countDocuments({ status: 'pending' }),
       this.appointmentModel.countDocuments({ status: 'pending', date: { $lt: new Date().toISOString().slice(0, 10) } }),
       this.orderModel.countDocuments({ paymentStatus: 'refunded' }),
+      Promise.all([
+        this.orderModel.countDocuments(chargebackFilter),
+        this.appointmentModel.countDocuments(chargebackFilter),
+        this.consultationModel.countDocuments(chargebackFilter),
+      ]).then(([orders, appts, consults]) => orders + appts + consults),
     ]);
     const items: Record<string, unknown>[] = [];
     if (pendingVets > 0) items.push({ type: 'pending_vets', count: pendingVets });
     if (pendingStores > 0) items.push({ type: 'pending_stores', count: pendingStores });
     if (overdueAppointments > 0) items.push({ type: 'overdue_appointments', count: overdueAppointments });
     if (disputedOrders > 0) items.push({ type: 'disputed_orders', count: disputedOrders });
+    if (chargebacks > 0) items.push({ type: 'chargebacks', count: chargebacks });
     return { data: items, message: 'Attention items retrieved' };
   }
 
@@ -785,32 +797,46 @@ export class AdminService {
   ): Promise<ServiceResponse<null>> {
     const now = new Date();
 
-    const update =
-      outcome === 'approve'
-        ? {
+    if (outcome === 'approve') {
+      const updated = await this.consultationModel.findOneAndUpdate(
+        { _id: new Types.ObjectId(sessionId), status: 'disputed' },
+        {
+          $set: {
             status: 'active' as const,
             paidAt: now,
             startedAt: now,
             autoExpireAt: new Date(now.getTime() + 24 * 60 * 60 * 1000),
             adminResolvedBy: new Types.ObjectId(adminId),
             adminResolvedAt: now,
-          }
-        : {
-            status: 'expired' as const,
-            refundRequired: true,
-            adminResolvedBy: new Types.ObjectId(adminId),
-            adminResolvedAt: now,
-            closedBy: 'admin' as const,
-            closedAt: now,
-          };
+          },
+        },
+        { new: true },
+      ).exec();
 
-    const updated = await this.consultationModel.findOneAndUpdate(
-      { _id: new Types.ObjectId(sessionId), status: 'disputed' },
-      { $set: update },
-      { new: true },
-    ).exec();
+      if (!updated) {
+        const exists = await this.consultationModel.findById(sessionId).lean().exec();
+        if (!exists) throw new NotFoundException({ message: 'Session not found', code: 'SESSION_NOT_FOUND' });
+        throw new BadRequestException({
+          message: 'This session is not currently disputed — it may have already been resolved',
+          code: 'INVALID_STATUS',
+        });
+      }
 
-    if (!updated) {
+      await this.postConsultationStatusMessage(updated, 'active', 'Payment dispute resolved — consultation started');
+      return { data: null, message: 'Disputed consultation approved' };
+    }
+
+    // outcome === 'reject': refund before committing the resolution — same pattern as
+    // appointment/order cancellation. refundRequired previously got set to true
+    // unconditionally here and nothing anywhere ever consumed it, so a rejected dispute never
+    // actually resulted in money moving. Now it's only true on a genuine refund failure, as a
+    // manual-follow-up flag — the resolution itself still proceeds either way, since an admin
+    // closing out a dispute case shouldn't be blocked by a transient Safepay error the way a
+    // customer-initiated cancel is.
+    const session = await this.consultationModel
+      .findOne({ _id: new Types.ObjectId(sessionId), status: 'disputed' })
+      .exec();
+    if (!session) {
       const exists = await this.consultationModel.findById(sessionId).lean().exec();
       if (!exists) throw new NotFoundException({ message: 'Session not found', code: 'SESSION_NOT_FOUND' });
       throw new BadRequestException({
@@ -819,13 +845,46 @@ export class AdminService {
       });
     }
 
-    await this.postConsultationStatusMessage(
-      updated,
-      outcome === 'approve' ? 'active' : 'expired',
-      outcome === 'approve' ? 'Payment dispute resolved — consultation started' : 'Payment dispute rejected — consultation ended',
-    );
+    let refundRequired = false;
+    if (session.paymentReference) {
+      try {
+        await this.safepayService.refundPayment(session.paymentReference, session.amount);
+      } catch (err) {
+        this.logger.error(
+          `Refund failed for rejected consultation dispute ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        refundRequired = true;
+      }
+    } else {
+      this.logger.error(`Disputed consultation ${sessionId} rejected but has no paymentReference — cannot refund automatically`);
+      refundRequired = true;
+    }
 
-    return { data: null, message: `Disputed consultation ${outcome === 'approve' ? 'approved' : 'rejected'}` };
+    const updated = await this.consultationModel.findOneAndUpdate(
+      { _id: new Types.ObjectId(sessionId), status: 'disputed' },
+      {
+        $set: {
+          status: 'expired' as const,
+          refundRequired,
+          adminResolvedBy: new Types.ObjectId(adminId),
+          adminResolvedAt: now,
+          closedBy: 'admin' as const,
+          closedAt: now,
+        },
+      },
+      { new: true },
+    ).exec();
+
+    if (!updated) {
+      throw new BadRequestException({
+        message: 'This session is not currently disputed — it may have already been resolved',
+        code: 'INVALID_STATUS',
+      });
+    }
+
+    await this.postConsultationStatusMessage(updated, 'expired', 'Payment dispute rejected — consultation ended');
+
+    return { data: null, message: 'Disputed consultation rejected' };
   }
 
   async resolveDisputedAppointment(

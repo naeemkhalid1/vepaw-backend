@@ -464,6 +464,57 @@ export class StoreService {
       return;
     }
 
+    if (event.type === 'payment.refunded') {
+      const updated = await this.orderModel
+        .findOneAndUpdate(
+          { _id: orderObjectId, paymentStatus: { $ne: 'refunded' } },
+          { $set: { paymentStatus: 'refunded' } },
+          { new: true },
+        )
+        .exec();
+      if (updated) {
+        // cancelOrder()/autoCancelUnconfirmedPaidOrders() already set 'refunded' synchronously
+        // before calling Safepay — reaching here means this webhook found it NOT already
+        // marked refunded, which is the exact drift this confirmation exists to catch.
+        this.logger.warn(
+          `Safepay payment.refunded: order ${orderId} was not already marked refunded — corrected via webhook confirmation`,
+        );
+      }
+      return;
+    }
+
+    if (
+      event.type === 'payment.disputed' ||
+      event.type === 'payment.dispute.won' ||
+      event.type === 'payment.dispute.lost'
+    ) {
+      const chargebackStatus =
+        event.type === 'payment.disputed'
+          ? 'disputed'
+          : event.type === 'payment.dispute.won'
+            ? 'won'
+            : 'lost';
+      await this.orderModel
+        .updateOne({ _id: orderObjectId }, { $set: { chargebackStatus } })
+        .exec();
+      // High-visibility on purpose — a chargeback is a card-network-level event, and 'lost'
+      // means money is being forcibly reversed by the card network regardless of what this
+      // app's own records say.
+      this.logger.error(
+        `Safepay ${event.type} for order ${orderId} — chargebackStatus set to '${chargebackStatus}'`,
+      );
+      return;
+    }
+
+    if (
+      event.type === 'payment:created' ||
+      event.type === 'refund:created' ||
+      event.type === 'error:occurred'
+    ) {
+      this.logger.log(`Safepay ${event.type} for order_id ${orderId}`);
+      return;
+    }
+
     this.logger.log(`Ignoring unhandled Safepay event type: ${event.type}`);
   }
 

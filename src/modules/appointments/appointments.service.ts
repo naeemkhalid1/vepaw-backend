@@ -480,15 +480,77 @@ export class AppointmentsService {
       return;
     }
 
+    // Applies to an already-promoted Appointment (same _id as the original reservation) — a
+    // refund/dispute can only happen after a real payment, never against a pending reservation.
+    if (event.type === 'payment.refunded') {
+      const updated = await this.appointmentModel
+        .findOneAndUpdate(
+          { _id: reservationObjectId, paymentStatus: { $ne: 'refunded' } },
+          { $set: { paymentStatus: 'refunded' } },
+          { new: true },
+        )
+        .exec();
+      if (updated) {
+        // Our own cancelAppointment()/updateAppointmentStatus() already set 'refunded'
+        // synchronously before calling Safepay — reaching here means this webhook found it
+        // NOT already marked refunded, which is the exact drift this confirmation exists to
+        // catch and correct.
+        this.logger.warn(
+          `Safepay payment.refunded: appointment ${orderId} was not already marked refunded — corrected via webhook confirmation`,
+        );
+      }
+      return;
+    }
+
+    if (
+      event.type === 'payment.disputed' ||
+      event.type === 'payment.dispute.won' ||
+      event.type === 'payment.dispute.lost'
+    ) {
+      const chargebackStatus =
+        event.type === 'payment.disputed'
+          ? 'disputed'
+          : event.type === 'payment.dispute.won'
+            ? 'won'
+            : 'lost';
+      await this.appointmentModel
+        .updateOne({ _id: reservationObjectId }, { $set: { chargebackStatus } })
+        .exec();
+      // High-visibility on purpose — a chargeback is a card-network-level event distinct from
+      // this app's own dispute flow, and 'lost' means money is being forcibly reversed by the
+      // card network regardless of what this app's own records say.
+      this.logger.error(
+        `Safepay ${event.type} for appointment ${orderId} — chargebackStatus set to '${chargebackStatus}'`,
+      );
+      return;
+    }
+
+    if (
+      event.type === 'payment:created' ||
+      event.type === 'refund:created' ||
+      event.type === 'error:occurred'
+    ) {
+      this.logger.log(`Safepay ${event.type} for order_id ${orderId}`);
+      return;
+    }
+
     this.logger.log(`Ignoring unhandled Safepay event type: ${event.type}`);
   }
 
   // Routing check for the shared Safepay webhook entry point (this module's controller is the
   // single endpoint Safepay actually delivers to — see AppointmentsWebhookController) — lets it
   // find out an event belongs to a reservation before delegating to handleSafepayEvent above.
+  // Must check both collections: the reservation only exists pre-payment and is deleted at
+  // promotion (payment.succeeded), while the real Appointment reuses the same _id afterward —
+  // a post-payment event (refund, dispute) would otherwise never match anything here and get
+  // silently dropped by the webhook controller as "not owned by any domain."
   async ownsOrderId(orderId: string): Promise<boolean> {
     if (!Types.ObjectId.isValid(orderId)) return false;
-    return (await this.reservationModel.exists({ _id: orderId })) !== null;
+    const [reservation, appointment] = await Promise.all([
+      this.reservationModel.exists({ _id: orderId }),
+      this.appointmentModel.exists({ _id: orderId }),
+    ]);
+    return reservation !== null || appointment !== null;
   }
 
   async listAppointments(

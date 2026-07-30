@@ -300,6 +300,55 @@ export class ConsultationsService {
       return;
     }
 
+    // No dedicated paymentStatus field on this schema (status alone carries both booking and
+    // payment state) — the actual refund is triggered synchronously by
+    // AdminService.resolveDisputedConsultation() on dispute-reject, same fail-safe pattern as
+    // appointments/orders. This is purely a reconciliation log confirming Safepay's side
+    // agrees, not something with a field left to correct.
+    if (event.type === 'payment.refunded') {
+      const exists = await this.consultationModel.exists({ paymentReference: tracker });
+      if (!exists) {
+        this.logger.warn(
+          `Safepay payment.refunded: no consultation session for tracker ${tracker}`,
+        );
+      } else {
+        this.logger.log(`Safepay payment.refunded confirmed for tracker ${tracker}`);
+      }
+      return;
+    }
+
+    if (
+      event.type === 'payment.disputed' ||
+      event.type === 'payment.dispute.won' ||
+      event.type === 'payment.dispute.lost'
+    ) {
+      const chargebackStatus =
+        event.type === 'payment.disputed'
+          ? 'disputed'
+          : event.type === 'payment.dispute.won'
+            ? 'won'
+            : 'lost';
+      await this.consultationModel
+        .updateOne({ paymentReference: tracker }, { $set: { chargebackStatus } })
+        .exec();
+      // High-visibility on purpose — a chargeback is a card-network-level event distinct from
+      // this app's own dispute flow, and 'lost' means money is being forcibly reversed by the
+      // card network regardless of what this app's own records say.
+      this.logger.error(
+        `Safepay ${event.type} for consultation tracker ${tracker} — chargebackStatus set to '${chargebackStatus}'`,
+      );
+      return;
+    }
+
+    if (
+      event.type === 'payment:created' ||
+      event.type === 'refund:created' ||
+      event.type === 'error:occurred'
+    ) {
+      this.logger.log(`Safepay ${event.type} for tracker ${tracker}`);
+      return;
+    }
+
     this.logger.log(`Ignoring unhandled Safepay event type: ${event.type}`);
   }
 

@@ -34,6 +34,7 @@ import {
 import { Thread, ThreadSchema } from '../../database/schemas/thread.schema';
 import { Message, MessageSchema } from '../../database/schemas/message.schema';
 import { RealtimeModule } from '../realtime/realtime.module';
+import { PaymentsModule } from '../../common/payments/payments.module';
 
 @Module({
   imports: [
@@ -62,6 +63,7 @@ import { RealtimeModule } from '../realtime/realtime.module';
     ]),
     forwardRef(() => AuthModule),
     RealtimeModule,
+    PaymentsModule,
   ],
   controllers: [
     AdminAuthController,
