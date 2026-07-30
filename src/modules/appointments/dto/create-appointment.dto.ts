@@ -34,9 +34,13 @@ export class CreateAppointmentDto {
   @IsIn(['cod'])
   paymentMethod: 'cod';
 
+  // Accepted but ignored — the actual fee charged is always vet.fee.min, set server-side in
+  // AppointmentsService.createAppointment(). Kept on the DTO only so existing app requests
+  // that still send it don't 400 against the global whitelist pipe.
   @ApiProperty({
     example: 1500,
-    description: 'Fee shown to user — validated server-side',
+    description:
+      "Deprecated — ignored. The vet's own minimum fee is always used.",
   })
   @IsNumber()
   @IsPositive()
