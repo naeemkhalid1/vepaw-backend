@@ -155,3 +155,37 @@ No code changes made for this yet — flagging so it doesn't get silently forgot
 - **Option C — narrower middle ground: allow the *same person* only after explicitly leaving their prior clinic.** Add a real "leave clinic" action that clears `clinicId`/`staffRole` on the existing record (with an audit trail of the departure), so the *existing* single-`clinicId` model can still represent "used to be at A, now at B" sequentially — just not concurrently. Cheaper than Option B, doesn't require a schema split, but still can't represent simultaneous multi-clinic work and needs careful handling of what happens to their historical appointments/reviews at clinic A. **Not decided.**
 
 Option A's fix means the *immediate* crash is gone, but it's a symptom patch, not a resolution — the admin-approval silent-discard bug and the total absence of a "leave clinic" flow are still real, undecided gaps. Don't mistake "the 500 is fixed" for "this is solved."
+
+---
+
+## 7. Store subscriptions — no recurring billing engine at all (found 2026-07-29, blocked on a Safepay capability question)
+
+**Context:** `src/modules/subscriptions/` is a dead empty shell (8-line controller, 4-line service, zero routes, zero schema) — the real subscription logic actually lives in `StoreService`, reusing `Order` with `isSubscription: true` plus `interval`/`nextOrderDate` fields already on the schema. `StoreService.createSubscription()` (`store.service.ts:259-317`) creates exactly **one** `Order` with `status: 'active'` — its own comment admits *"no recurring billing engine exists yet... nothing here calls Safepay to actually charge on an ongoing basis."* Nothing anywhere ever creates a second billing cycle. A customer "subscribing" today gets charged once, and then nothing happens again, ever.
+
+**Two more bugs found in the same area, independent of the missing engine:**
+- `UpdateSubscriptionDto` only allows `status: 'paused' | 'cancelled'` — there is no `'active'` option, so **a paused subscription can never be resumed** via the customer-facing endpoint.
+- `StorePortalService.updateSubscriptionStatus()` (`store-portal.service.ts:1112-1119`) is worse: `status: status === 'paused' || status === 'cancelled' ? 'cancelled' : 'confirmed'` — a store owner "pausing" a subscription from their dashboard actually **cancels it outright**, and the only other branch writes `'confirmed'` (not even `'active'`), which isn't a meaningful subscription state at all.
+- Reporting is entirely fake regardless of the above: `monthlyRecurring: 'PKR 0'`, `dueThisWeek: 0`, `activePlansChange: 0` are hardcoded (`store-portal.service.ts:289-293`), and `frequency: 'Monthly'` (`store-portal.service.ts:269`) is a hardcoded literal regardless of the subscription's actual `interval`.
+
+### The blocking question: can Safepay charge without a customer present?
+
+Every payment in this codebase today goes through `SafepayService.createCheckoutSession()` → `payments.session.setup()` — a hosted checkout **redirect**, no exception, confirmed by reading `safepay.service.ts` directly. But the installed SDK (`@sfpy/node-core`) also exposes an entirely unused `order.vault.session()` / `order.vault.card()` API plus `customers.paymentMethods` / `user.cards` resources — so Safepay does support saving a card. What's **not answerable from the SDK alone** (its types are all untyped `params?: any`) is whether a vaulted card can then be charged **server-to-server with no customer present** — the "merchant-initiated transaction" primitive every real subscription product needs. This needs Safepay's actual API docs or their integration team, not more code-reading — same category of external dependency as the JazzCash/EasyPaisa disbursement gap in item 3, but should only take a docs/support question, not a business-onboarding process.
+
+### Two designs, depending on the answer
+
+- **Option A — true card-on-file (preferred, if Safepay's Vault supports merchant-initiated charges).** Customer vaults a card once at signup; a cron charges it automatically each cycle with no redirect and no customer action — standard Netflix/Spotify-style UX. Needs a vault-session flow at subscription creation and a stored card/customer token on the subscription record.
+- **Option B — recurring reminder + re-checkout (fallback, works today with zero new Safepay capability).** N days before `nextOrderDate`, notify the customer and send them through the existing `createCheckoutSession()` flow again, same as a one-off order. Ships faster, but real friction — a "subscription" that requires manually re-checking-out every cycle has poor renewal completion in practice.
+
+**Not decided — recommend confirming with Safepay before building the engine**, since the retry/failure/dunning shape differs meaningfully between "a charge silently failed" (A) and "the customer never clicked the link" (B).
+
+### Full build list once the above is answered
+1. **Real `Subscription` schema**, separate from `Order`. Today one `Order` document is asked to represent both "the recurring plan" and "one shipment" at once — that conflation is *why* pause/resume is broken. A `Subscription` record (product, qty, interval, `nextChargeDate`, `paymentMethod`, vaulted-card-token-if-A, `status: active|paused|cancelled`, `failedAttempts`) should be the source of truth; each billing cycle spawns a **new** `Order` reusing `placeOrder()`'s existing logic — including the atomic stock-reservation fix already shipped (`StoreService.reserveStock()`/`restoreStock()`, 2026-07-29) — rather than mutating one `Order` forever.
+2. **Daily billing cron**: find subscriptions where `nextChargeDate <= now && status === 'active'`, attempt charge, on success create that cycle's `Order` (stock-checked the same way a normal order is — decide the policy for a recurring item that's gone permanently out of stock: skip-and-notify vs. auto-pause), advance `nextChargeDate`, reset failure count.
+3. **Dunning policy** (needs a product decision): standard shape is retry after e.g. 1/3/7 days, notify the customer on each failure, auto-pause after N consecutive failures rather than silently dropping the subscription.
+4. **Fix pause/resume properly** — add `'active'` as a valid target status to `UpdateSubscriptionDto`, and remove the collapse-to-cancelled bug in `store-portal.service.ts:1115`. This is a real bug independent of the Option A/B decision above.
+5. **Cancellation policy decision**: does cancelling mid-cycle refund the current period, or just stop future charges? Would reuse the same `SafepayService.refundPayment()` pattern already wired for appointments/store orders.
+6. **Notifications**: pre-charge reminder (especially load-bearing for Option B), charge-succeeded receipt, charge-failed alert, paused/cancelled confirmation.
+7. **Make store-portal reporting real** — `monthlyRecurring`, `dueThisWeek`, `activePlansChange` all need real aggregations once cycles actually recur; `frequency: 'Monthly'` needs to read the actual `interval`.
+8. **Decide the fate of `src/modules/subscriptions/`** — delete the dead empty shell, or actually move the logic there instead of leaving it split across `StoreService`.
+
+No code changes made for this yet — purely a planning/scoping pass, blocked on the Safepay Vault question above before implementation should start.
