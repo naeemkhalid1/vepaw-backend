@@ -225,11 +225,14 @@ export class StorePortalService {
     ).exec();
     if (!order) throw new NotFoundException('Order not found');
 
-    // existing.status !== 'cancelled' guards against a repeat cancel call double-restoring —
-    // there's no TERMINAL_STATUSES-style guard on this endpoint blocking that the way the
-    // customer-facing StoreService.updateOrderStatus() has.
+    // existing.status !== 'cancelled'/'delivered' guards against a repeat call double-applying
+    // either effect — there's no TERMINAL_STATUSES-style guard on this endpoint blocking that
+    // the way the customer-facing StoreService.cancelOrder() has.
     if (status === 'cancelled' && existing.status !== 'cancelled') {
       await this.restoreStock(existing.items);
+    }
+    if (status === 'delivered' && existing.status !== 'delivered') {
+      await this.incrementSold(existing.items);
     }
 
     return { data: null, message: `Order ${status}` };
@@ -246,6 +249,20 @@ export class StorePortalService {
           { _id: item.product },
           { $inc: { stock: item.qty }, $set: { inStock: true } },
         )
+        .exec();
+    }
+  }
+
+  // Mirrors StoreService.incrementSold() — Product.sold was never written anywhere on the
+  // store-portal path either, so 'popular' sort and the "Total Sold" stat were always stuck at
+  // 0 for orders delivered directly through the store dashboard, same root cause as the
+  // customer-facing path.
+  private async incrementSold(
+    items: { product: Types.ObjectId; qty: number }[],
+  ): Promise<void> {
+    for (const item of items) {
+      await this.productModel
+        .updateOne({ _id: item.product }, { $inc: { sold: item.qty } })
         .exec();
     }
   }

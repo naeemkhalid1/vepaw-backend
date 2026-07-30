@@ -67,6 +67,7 @@ export class VetsService {
     if (dto.maxFee) baseFilter['fee.min'] = { $lte: dto.maxFee };
 
     if (dto.lat !== undefined && dto.lng !== undefined) {
+      const sort = dto.sort ?? 'nearest';
       const geoNear: PipelineStage = {
         $geoNear: {
           near: { type: 'Point' as const, coordinates: [dto.lng, dto.lat] as [number, number] },
@@ -76,10 +77,22 @@ export class VetsService {
           query: baseFilter,
         },
       };
+      // $geoNear already outputs documents nearest-first — for 'nearest' that ordering is left
+      // untouched rather than re-sorted. Previously this always re-sorted by featured/rating
+      // regardless of what the caller asked for, silently discarding distance even though it
+      // was computed into distanceKm — a "near me" search never actually prioritized nearby
+      // vets. 'rating'/'featured' are now an explicit, opt-in override instead of the only path.
+      const sortStages: PipelineStage[] =
+        sort === 'rating'
+          ? [{ $sort: { rating: -1 } }]
+          : sort === 'featured'
+            ? [{ $sort: { featured: -1, rating: -1 } }]
+            : [];
+
       const [items, countResult] = await Promise.all([
         this.vetModel.aggregate<VetRaw>([
           geoNear,
-          { $sort: { featured: -1, rating: -1 } },
+          ...sortStages,
           { $skip: skip },
           { $limit: limit },
         ]),
@@ -93,10 +106,16 @@ export class VetsService {
       };
     }
 
+    // No coordinates — 'nearest' isn't meaningful without them, falls back to 'featured'
+    // ordering (the same as the default) rather than erroring, since a client might reasonably
+    // send sort=nearest speculatively before it has a location fix yet.
+    const sortSpec: Record<string, 1 | -1> =
+      dto.sort === 'rating' ? { rating: -1 } : { featured: -1, rating: -1 };
+
     const [items, total] = await Promise.all([
       this.vetModel
         .find(baseFilter)
-        .sort({ featured: -1, rating: -1 })
+        .sort(sortSpec)
         .skip(skip)
         .limit(limit)
         .lean<VetRaw[]>(),

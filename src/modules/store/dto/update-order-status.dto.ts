@@ -1,28 +1,11 @@
-import { IsIn, IsNotEmpty, IsOptional, IsString } from 'class-validator';
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
-import { ValidateNested } from 'class-validator';
+import { IsIn } from 'class-validator';
+import { ApiProperty } from '@nestjs/swagger';
 
-export class RiderDto {
-  @ApiProperty({ example: 'Ahmed' })
-  @IsString()
-  @IsNotEmpty()
-  name: string;
-
-  @ApiProperty({ example: '03001234567' })
-  @IsString()
-  @IsNotEmpty()
-  phone: string;
-}
-
+// Customer-facing order status update — deliberately cancel-only. Fulfillment transitions
+// (confirmed/packed/dispatched/delivered) are a separate, store-owned action reached via
+// StorePortalService.updateOrderStatus(), never from the pet-owner app.
 export class UpdateOrderStatusDto {
-  @ApiProperty({ enum: ['confirmed', 'packed', 'dispatched', 'delivered', 'cancelled'] })
-  @IsIn(['confirmed', 'packed', 'dispatched', 'delivered', 'cancelled'])
-  status: 'confirmed' | 'packed' | 'dispatched' | 'delivered' | 'cancelled';
-
-  @ApiPropertyOptional({ type: RiderDto, description: 'Required when status = dispatched' })
-  @IsOptional()
-  @ValidateNested()
-  @Type(() => RiderDto)
-  rider?: RiderDto;
+  @ApiProperty({ enum: ['cancelled'], description: 'Only cancellation is supported here.' })
+  @IsIn(['cancelled'])
+  status: 'cancelled';
 }
